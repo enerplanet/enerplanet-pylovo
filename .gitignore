@@ -14,7 +14,7 @@ classification/examples/**/*.ipynb
 
 # Environments
 .env
-.env.*
+.env.docker
 .venv
 env/
 venv/

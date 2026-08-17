@@ -105,6 +105,11 @@ create-network:
 
 ## dev: Start development container (hot reload, single API, no HAProxy)
 dev: create-network
+	@echo "> .env check..."
+	@if [ ! -f .env.docker ]; then \
+		echo "Creating .env.docker..."; \
+		cp .env.example .env.docker; \
+	fi
 	@echo "> Starting development container..."
 	docker compose -f $(COMPOSE_FILE_DEV) up -d --build
 	@echo "[OK] Development container started at http://localhost:8086"
