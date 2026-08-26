@@ -2,24 +2,23 @@
 # Pylovo Makefile
 # =============================================================================
 # Usage:
-#   make setup     - Extract raw_data, create database, and build container
+#   make setup     - Create database, and build container
 #   make build     - Build Docker container
-#   make dev       - Start development container (hot reload)
+#   make dev       - Start development container without HAProxy
 #   make prod      - Start production containers (3 API instances + HAProxy)
 #   make down      - Stop container
 #   make shell     - Open shell in container
 #   make logs      - View container logs
 # =============================================================================
 
-.PHONY: setup extract build up down restart shell logs clean help \
+.PHONY: setup build up down restart shell logs clean help \
         datapipeline constructor repair-postcodes grid process-germany-chain delete delete-dry-run cleanup-user-dry-run cleanup-user \
-        create-db lfs-pull dev prod prod-down dump-state load-state load-bremen
+        create-db lfs-pull dev prod prod-down dump-state load-state dump-full-db load-full-db
 
 # Default target
 .DEFAULT_GOAL := help
 
 # Variables
-CONTAINER_NAME_DEV := pylovo-api-dev
 CONTAINER_NAME_PROD := pylovo-api-1
 
 #   make <target> CONTAINER_NAME=pylovo-api-dev PGROUTING_CONTAINER=postgres
@@ -52,8 +51,33 @@ GERMANY_CHAIN_STATES ?= bremen berlin hamburg brandenburg sachsen saarland thuer
 # Setup & Build
 # =============================================================================
 
+env-info:
+	@echo "----------------------------------------------------------------------"
+	@echo "INFORMATION: A EP-Online API Key is required for dataset creation."
+	@echo "You can request a API key via https://apikey.ep-online.nl/"
+	@echo "If it is not set you can always set it manually via 'make setup-env' or directly in the .env file."
+	@echo "Without it you can still run the container and use the API, but dataset creation will fail until you set the key and rebuild the container."
+	@echo "----------------------------------------------------------------------"
+
+create-env:
+	@cp -n .env.docker .env 2>/dev/null || true
+
+setup-env: create-env env-info
+	@if grep -qE "^EP_ONLINE_API_KEY=.+" .env; then \
+		echo "EP_ONLINE_API_KEY is already set. Skipping..."; \
+	else \
+		echo "|| You can leave the API key empty but dataset creation will fail until it is set and the container rebuilt."; \
+		read -p "Enter EP_ONLINE_API_KEY: " key; \
+		if [ ! -z "$$key" ]; then \
+			sed -i'' "s|^EP_ONLINE_API_KEY=.*|EP_ONLINE_API_KEY=$$key|" .env; \
+			echo "Updated .env successfully."; \
+		else \
+			echo "No key entered. Keeping default/empty value."; \
+		fi \
+	fi
+
 ## setup: Full setup - pull LFS files, create database and build container
-setup: lfs-pull create-db build up
+setup: setup-env lfs-pull create-db build up
 	@echo "[OK] Setup complete!"
 
 ## lfs-pull: Install and pull Git LFS files
@@ -64,10 +88,6 @@ lfs-pull:
 	@echo "> Pulling LFS files..."
 	@git lfs pull
 	@echo "[OK] LFS files ready"
-
-## extract: Extract raw_data.7z archive (handled by Dockerfile during build)
-extract:
-	@echo "> Extraction is handled automatically by Dockerfile during 'make build'"
 
 ## create-db: Create pylovo_db database in pgrouting container
 create-db:
@@ -103,20 +123,15 @@ create-network:
 		(echo "> Creating external network spatialhub-net..." && \
 		docker network create spatialhub-net)
 
-## dev: Start development container (hot reload, single API, no HAProxy)
-dev: create-network
+
+build-dev:
 	@echo "> Starting development container..."
 	docker compose -f $(COMPOSE_FILE_DEV) up -d --build
 	@echo "[OK] Development container started at http://localhost:8086"
-	@if [ -f "$(DUMP_DIR)/bremen.sql.gz" ]; then \
-		echo "> Loading Bremen dataset..."; \
-		sleep 5; \
-		docker exec postgres bash -c \
-			'psql -U postgres -d pylovo_db -tc "SELECT 1 FROM buildings_result LIMIT 1" 2>/dev/null | grep -q 1' \
-			&& echo "[OK] Data already loaded, skipping" \
-			|| (gunzip -c $(DUMP_DIR)/bremen.sql.gz | docker exec -i postgres psql -U postgres -d pylovo_db -q \
-				&& echo "[OK] Bremen dataset loaded"); \
-	fi
+
+
+## dev: Start development container (hot reload, single API, no HAProxy)
+dev: create-env create-network load-full-db build-dev env-info
 
 ## prod: Start production containers (3 API instances + HAProxy)
 prod: create-network
@@ -124,9 +139,6 @@ prod: create-network
 	docker compose -f $(COMPOSE_FILE_PROD) pull postgres
 	docker compose -f $(COMPOSE_FILE_PROD) up -d
 	@echo "[OK] Production started at http://localhost:8086 (stats: http://localhost:8404)"
-
-## up: Start container in background (alias for dev)
-up: dev
 
 ## down: Stop and remove containers (both dev and prod)
 down:
@@ -267,7 +279,7 @@ run:
 	docker exec -it $(CONTAINER_NAME) $(CMD)
 
 # =============================================================================
-# Data Dump / Load (for localhost dev)
+# Data Dump / Load
 # =============================================================================
 
 ## dump-state: Dump a processed state from pylovo DB (usage: make dump-state STATE=bremen)
@@ -291,9 +303,46 @@ load-state:
 	gunzip -c $(DUMP_DIR)/$(STATE_EFFECTIVE).sql.gz | docker exec -i pylovo-postgres psql -U postgres -d pylovo_db -q
 	@echo "[OK] $(STATE_EFFECTIVE) data loaded"
 
-## load-bremen: Shortcut to load Bremen dataset
-load-bremen:
-	@$(MAKE) load-state STATE=bremen
+## dump-full-db: Dump the complete pylovo_db to raw_data/
+dump-full-db:
+	@mkdir -p $(RAW_DATA_DIR)
+	@echo "> Dumping full pylovo_db database..."
+	docker exec $(PGROUTING_CONTAINER) pg_dump -U postgres -d pylovo_db \
+		| gzip > $(RAW_DATA_DIR)/pylovo_db_full.sql.gz
+	@echo "[OK] Full dump saved to $(RAW_DATA_DIR)/pylovo_db_full.sql.gz"
+
+## load-full-db: Load a full database dump from raw_data/
+# Define the dump file path as a variable to prevent repetition
+DB_DUMP_FILE := $(RAW_DATA_DIR)/pylovo_db_full.sql.gz
+
+load-full-db:
+	@if [ ! -f "$(DB_DUMP_FILE)" ]; then \
+		echo "ERROR: $(DB_DUMP_FILE) not found" >&2; \
+		exit 1; \
+	fi
+	@if docker exec -i $(PGROUTING_CONTAINER) psql -U postgres -lqt | cut -d \| -f 1 | grep -qw pylovo_db; then \
+		echo "----------------------------------------------------------------------"; \
+		echo "NOTICE: Database 'pylovo_db' already exists."; \
+		echo "If you want to perform a fresh load, please run: make reset-full-db"; \
+		echo "----------------------------------------------------------------------"; \
+	else \
+		docker exec -i $(PGROUTING_CONTAINER) createdb -U postgres pylovo_db; \
+		echo "> Loading full database dump..."; \
+		bash -c "set -o pipefail; gunzip -c '$(DB_DUMP_FILE)' | docker exec -i $(PGROUTING_CONTAINER) psql -U postgres -d pylovo_db -v ON_ERROR_STOP=1 -q"; \
+		echo "[OK] Database has been loaded from $(DB_DUMP_FILE)"; \
+	fi
+
+.PHONY: drop-db
+drop-db:
+	@echo "> Dropping database 'pylovo_db'..."
+	@docker exec -i $(PGROUTING_CONTAINER) psql -U postgres -c \
+		"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = 'pylovo_db' AND pid <> pg_backend_pid();" > /dev/null
+	@docker exec -i $(PGROUTING_CONTAINER) dropdb -U postgres --if-exists pylovo_db
+	@echo "[OK] Database dropped"
+
+.PHONY: reset-full-db
+reset-full-db: drop-db load-full-db
+	@echo "[OK] Database reset complete"
 
 # =============================================================================
 # Cleanup
@@ -314,8 +363,8 @@ help:
 	@echo "Pylovo Makefile Commands"
 	@echo ""
 	@echo "Setup & Build:"
-	@echo "  make setup              Full setup (extract + create db + build + start)"
-	@echo "  make extract            Extract raw_data.7z archive"
+	@echo "  make setup-env					 Create .env file and set EP_ONLINE_API_KEY"
+	@echo "  make setup              Full setup (Create db + build + start)"
 	@echo "  make lfs-pull           Install git-lfs and pull LFS files"
 	@echo "  make create-db          Create pylovo_db in pgrouting container"
 	@echo "  make build              Build Docker container"
@@ -324,7 +373,6 @@ help:
 	@echo "Container Management:"
 	@echo "  make dev                Start development (single API, no HAProxy)"
 	@echo "  make prod               Start production (3 instances + HAProxy)"
-	@echo "  make up                 Alias for 'make dev'"
 	@echo "  make down               Stop all containers"
 	@echo "  make prod-down          Stop production containers only"
 	@echo "  make restart            Restart development container"
@@ -352,7 +400,10 @@ help:
 	@echo "Data Dump / Load:"
 	@echo "  make dump-state STATE=bremen   Dump processed state to initial-data/"
 	@echo "  make load-state STATE=bremen   Load state dump into pylovo_db"
-	@echo "  make load-bremen               Shortcut: load Bremen dataset"
+	@echo "  make dump-full-db              Dump full pylovo_db to raw_data/"
+	@echo "  make load-full-db              Load full pylovo_db from raw_data/"
+	@echo "	 make drop-db                   Drop pylovo_db database"
+	@echo "  make reset-full-db             Drop, recreate, and load full pylovo_db from raw_data/"
 	@echo ""
 	@echo "Cleanup:"
 	@echo "  make clean              Remove container and images"
