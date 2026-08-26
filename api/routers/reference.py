@@ -25,6 +25,22 @@ def _ensure_reference_schema_once() -> None:
             return
         try:
             with get_cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT COUNT(DISTINCT column_name) = 2
+                    FROM information_schema.columns
+                    WHERE table_schema = ANY(current_schemas(FALSE))
+                      AND table_name = 'equipment_data'
+                      AND column_name = ANY(
+                          ARRAY['equipment_only_cost_eur', 'installed_cost_eur']
+                      );
+                    """
+                )
+                if cur.fetchone()[0]:
+                    _REFERENCE_SCHEMA_READY = True
+                    return
+
+                cur.execute("SET LOCAL lock_timeout = '5s';")
                 cur.execute("ALTER TABLE IF EXISTS equipment_data ADD COLUMN IF NOT EXISTS equipment_only_cost_eur INTEGER;")
                 cur.execute("ALTER TABLE IF EXISTS equipment_data ADD COLUMN IF NOT EXISTS installed_cost_eur INTEGER;")
             _REFERENCE_SCHEMA_READY = True

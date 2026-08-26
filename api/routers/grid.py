@@ -166,8 +166,8 @@ def _build_scope_filter(payload: GridRequest, alias: str) -> tuple[str, list]:
     return " AND ".join(clauses), params
 
 
-def _ensure_runtime_schema_once(dbc: DatabaseClient) -> None:
-    """Run compatibility DDL once per worker to avoid per-request lock/jitter."""
+def ensure_runtime_schema(dbc: DatabaseClient) -> None:
+    """Validate compatibility schema once during worker startup."""
     global _RUNTIME_SCHEMA_READY
     if _RUNTIME_SCHEMA_READY:
         return
@@ -176,6 +176,59 @@ def _ensure_runtime_schema_once(dbc: DatabaseClient) -> None:
         if _RUNTIME_SCHEMA_READY:
             return
         try:
+            # The Python lock only coordinates threads in one worker. A
+            # transaction-scoped PostgreSQL advisory lock serializes schema
+            # checks across all API workers and containers.
+            dbc.cur.execute("SET LOCAL lock_timeout = '15s';")
+            dbc.cur.execute("SELECT pg_advisory_xact_lock(7046029254386353131);")
+
+            dbc.cur.execute(
+                """
+                WITH required(table_name, column_name) AS (
+                    VALUES
+                        ('grid_result', 'user_id'),
+                        ('grid_result', 'model_id'),
+                        ('grid_result', 'draft_id'),
+                        ('buildings_result', 'f_classes'),
+                        ('buildings_result', 'height_max'),
+                        ('buildings_result', 'height_ground'),
+                        ('buildings_result', 'height_median'),
+                        ('buildings_result', 'floors_3dbag'),
+                        ('buildings_result', 'bag_id'),
+                        ('buildings_result', 'energy_label'),
+                        ('buildings_result', 'energy_index'),
+                        ('buildings_result', 'cbs_population'),
+                        ('buildings_result', 'cbs_households'),
+                        ('buildings_result', 'cbs_avg_household_size'),
+                        ('res', 'f_classes'),
+                        ('res', 'energy_label'),
+                        ('res', 'energy_index'),
+                        ('oth', 'f_classes'),
+                        ('oth', 'energy_label'),
+                        ('oth', 'energy_index'),
+                        ('equipment_data', 'equipment_only_cost_eur'),
+                        ('equipment_data', 'installed_cost_eur')
+                ),
+                existing AS (
+                    SELECT table_name, column_name
+                    FROM information_schema.columns
+                    WHERE table_schema = ANY(current_schemas(FALSE))
+                )
+                SELECT
+                    NOT EXISTS (
+                        SELECT table_name, column_name FROM required
+                        EXCEPT
+                        SELECT table_name, column_name FROM existing
+                    )
+                    AND to_regclass('building_transformer_assignments') IS NOT NULL;
+                """
+            )
+            if dbc.cur.fetchone()[0]:
+                dbc.conn.commit()
+                _RUNTIME_SCHEMA_READY = True
+                print("[Schema] Runtime schema already current")
+                return
+
             dbc.cur.execute("ALTER TABLE grid_result ADD COLUMN IF NOT EXISTS user_id VARCHAR(255);")
             dbc.cur.execute("ALTER TABLE grid_result ADD COLUMN IF NOT EXISTS model_id INTEGER;")
             dbc.cur.execute("ALTER TABLE grid_result ADD COLUMN IF NOT EXISTS draft_id VARCHAR(255);")
@@ -220,6 +273,7 @@ def _ensure_runtime_schema_once(dbc: DatabaseClient) -> None:
         except Exception as schema_err:
             dbc.conn.rollback()
             print(f"[Schema] Runtime schema check failed: {schema_err}")
+            raise
 
 
 def _fetch_state_boundary_bbox_for_centroid(dbc: DatabaseClient, lon: float, lat: float) -> dict | None:
@@ -315,10 +369,10 @@ async def generate_grid_phase1(payload: GridRequest):
     GeoPandas script so that Pylovo returns exactly the same
     buildings for a given polygon.
     """
+    dbc = None
     try:
         request_started = time.perf_counter()
         dbc = DatabaseClient()
-        _ensure_runtime_schema_once(dbc)
         input_srid = infer_input_srid(payload.geom)
         print(f"[Grid Query] Detected input SRID: {input_srid}")
 
@@ -1133,14 +1187,17 @@ async def generate_grid_phase1(payload: GridRequest):
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if dbc is not None:
+            dbc.close()
 
 
 @router.post("/grid-statistics")
 async def get_grid_statistics(payload: GridStatisticsRequest):
     """Get detailed statistics for specified grid result IDs"""
+    dbc = None
     try:
         dbc = DatabaseClient()
-        _ensure_runtime_schema_once(dbc)
         grid_ids = payload.grid_result_ids
 
         if not grid_ids:
@@ -1320,3 +1377,6 @@ async def get_grid_statistics(payload: GridStatisticsRequest):
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if dbc is not None:
+            dbc.close()

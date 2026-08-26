@@ -18,6 +18,7 @@ app.add_middleware(
 
 # Import connection pool and cache
 from src.database.connection_pool import init_pool, close_pool
+from src.database.database_client import DatabaseClient
 from src import cache
 
 # Include modular routers
@@ -35,6 +36,10 @@ app.include_router(boundary.router)
 async def startup_event():
     """Initialize connection pool and Redis cache on startup."""
     init_pool()
+    # Compatibility DDL is serialized here before the worker accepts traffic;
+    # request handlers never perform schema changes.
+    with DatabaseClient() as dbc:
+        grid.ensure_runtime_schema(dbc)
     cache.init_redis()
     worker_id = os.environ.get('WORKER_ID', '?')
     print(f"[Startup] PyLovo API worker {worker_id} ready with connection pooling and Redis cache")

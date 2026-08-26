@@ -15,6 +15,28 @@ router = APIRouter(tags=["transformer"])
 VERSION_ID = "1"
 
 
+def _require_transformer_schema(cur) -> None:
+    """Verify the transformer scope schema."""
+    cur.execute(
+        """
+        SELECT
+            (
+                SELECT COUNT(DISTINCT column_name) = 3
+                FROM information_schema.columns
+                WHERE table_schema = ANY(current_schemas(FALSE))
+                  AND table_name = 'grid_result'
+                  AND column_name = ANY(ARRAY['user_id', 'model_id', 'draft_id'])
+            )
+            AND to_regclass('building_transformer_assignments') IS NOT NULL;
+        """
+    )
+    if not cur.fetchone()[0]:
+        raise HTTPException(
+            status_code=503,
+            detail="Transformer database schema is not ready",
+        )
+
+
 @router.post("/add-transformer")
 async def add_transformer(payload: AddTransformerRequest):
     """
@@ -27,6 +49,7 @@ async def add_transformer(payload: AddTransformerRequest):
 
     Returns updated grid data including the new transformer and reassigned buildings.
     """
+    dbc = None
     try:
         if len(payload.coordinates) != 2:
             raise HTTPException(status_code=400, detail="Coordinates must be [longitude, latitude]")
@@ -39,14 +62,11 @@ async def add_transformer(payload: AddTransformerRequest):
 
         with get_connection() as conn:
             with conn.cursor() as cur:
-                # Add user_id, model_id, and draft_id columns if they don't exist
-                try:
-                    cur.execute("ALTER TABLE grid_result ADD COLUMN IF NOT EXISTS user_id VARCHAR(255);")
-                    cur.execute("ALTER TABLE grid_result ADD COLUMN IF NOT EXISTS model_id INTEGER;")
-                    cur.execute("ALTER TABLE grid_result ADD COLUMN IF NOT EXISTS draft_id VARCHAR(255);")
-                    conn.commit()
-                except Exception:
-                    conn.rollback()
+                # DDL must never run in a request. Even IF NOT EXISTS requires
+                # an AccessExclusiveLock and can queue the whole API behind a
+                # long-running read transaction.
+                cur.execute("SET LOCAL lock_timeout = '5s';")
+                _require_transformer_schema(cur)
 
                 # Generate unique OSM ID for the new transformer
                 new_osm_id = f"user/{int(time.time() * 1000)}"
@@ -125,23 +145,6 @@ async def add_transformer(payload: AddTransformerRequest):
 
                     if buildings_to_reassign:
                         osm_ids_to_reassign = [row[0] for row in buildings_to_reassign]
-
-                        # Ensure building_transformer_assignments table exists
-                        cur.execute("""
-                            CREATE TABLE IF NOT EXISTS building_transformer_assignments (
-                                assignment_id SERIAL PRIMARY KEY,
-                                building_osm_id VARCHAR NOT NULL,
-                                grid_result_id BIGINT NOT NULL,
-                                user_id VARCHAR(255),
-                                model_id INTEGER,
-                                draft_id VARCHAR(255),
-                                version_id VARCHAR(10) DEFAULT '1',
-                                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                            );
-                            CREATE INDEX IF NOT EXISTS idx_bta_building ON building_transformer_assignments (building_osm_id);
-                            CREATE INDEX IF NOT EXISTS idx_bta_model ON building_transformer_assignments (model_id);
-                            CREATE INDEX IF NOT EXISTS idx_bta_draft ON building_transformer_assignments (draft_id);
-                        """)
 
                         # Insert assignments into the new table (model-specific, not global)
                         for osm_id in osm_ids_to_reassign:
@@ -349,9 +352,14 @@ async def add_transformer(payload: AddTransformerRequest):
             "message": f"Created transformer at [{lon:.6f}, {lat:.6f}] with {payload.kva} kVA. Reassigned {len(reassigned_buildings)} buildings with {len(new_lines_gdf)} cable connections."
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if dbc is not None:
+            dbc.close()
 
 
 @router.post("/assign-building")
@@ -379,19 +387,7 @@ async def assign_building_to_transformer(payload: dict):
 
         with get_connection() as conn:
             with conn.cursor() as cur:
-                # Ensure building_transformer_assignments table exists
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS building_transformer_assignments (
-                        assignment_id SERIAL PRIMARY KEY,
-                        building_osm_id VARCHAR NOT NULL,
-                        grid_result_id BIGINT NOT NULL,
-                        user_id VARCHAR(255),
-                        model_id INTEGER,
-                        draft_id VARCHAR(255),
-                        version_id VARCHAR(10) DEFAULT '1',
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    );
-                """)
+                _require_transformer_schema(cur)
 
                 cur.execute("""
                     SELECT br.grid_result_id,

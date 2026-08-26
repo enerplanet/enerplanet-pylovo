@@ -140,6 +140,7 @@ async def run_power_flow(payload: PowerFlowRequest):
 
     Builds the pandapower network dynamically from stored grid data (lines, transformers, loads).
     """
+    dbc = None
     try:
         import pandapower as pp
         from collections import Counter
@@ -602,3 +603,6 @@ async def run_power_flow(payload: PowerFlowRequest):
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if dbc is not None:
+            dbc.close()
