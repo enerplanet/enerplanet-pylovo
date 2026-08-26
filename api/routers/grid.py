@@ -1033,11 +1033,13 @@ async def generate_grid_phase1(payload: GridRequest):
                            br.grid_result_id AS original_grid_id,
                            ST_Transform(br.geom, 4326) AS geom
                     FROM building_transformer_assignments bta
-                    JOIN buildings_result br ON bta.building_osm_id = br.osm_id
+                    JOIN buildings_result br
+                      ON br.version_id = %s
+                     AND br.osm_id = bta.building_osm_id
                     JOIN grid_result gr ON bta.grid_result_id = gr.grid_result_id
                     WHERE {' AND '.join(reassign_conditions)};
                 """
-                dbc.cur.execute(reassign_sql, tuple(reassign_params))
+                dbc.cur.execute(reassign_sql, tuple([VERSION_ID] + reassign_params))
                 reassign_rows = dbc.cur.fetchall()
 
                 if reassign_rows:
