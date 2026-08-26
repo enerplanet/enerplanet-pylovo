@@ -883,11 +883,13 @@ async def generate_grid_phase1(payload: GridRequest):
                 dbc.cur.execute(f"""
                     SELECT DISTINCT br.vertice_id, br.grid_result_id as original_grid
                     FROM building_transformer_assignments bta
-                    JOIN buildings_result br ON bta.building_osm_id = br.osm_id
+                    JOIN buildings_result br
+                      ON br.version_id = %s
+                     AND br.osm_id = bta.building_osm_id
                     WHERE ({reassign_where})
                       AND br.vertice_id IS NOT NULL
                       AND bta.grid_result_id != br.grid_result_id;
-                """, reassign_params)
+                """, [VERSION_ID] + reassign_params)
                 reassigned_data = dbc.cur.fetchall()
                 reassigned_vertices = [(row[0], row[1]) for row in reassigned_data if row[0] is not None]
                 print(f"[Lines Query] Found {len(reassigned_vertices)} reassigned building vertices to exclude")
