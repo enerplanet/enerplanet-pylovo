@@ -1085,6 +1085,7 @@ async def generate_grid_phase1(payload: GridRequest):
                 if not reassigned_buildings.empty:
                     synthetic_reassign_lines = []
                     line_id_start = lines['line_id'].max() + 1 if not lines.empty and 'line_id' in lines.columns else 200000
+                    loop_started = time.perf_counter()
 
                     for idx, bldg in reassigned_buildings.iterrows():
                         new_grid_id = bldg.get('new_grid_id')
@@ -1118,23 +1119,31 @@ async def generate_grid_phase1(payload: GridRequest):
                                     WITH trafo_pt AS (SELECT ST_Transform(ST_SetSRID(ST_MakePoint(%s, %s), 4326), 3035) as geom),
                                     bldg_pt AS (SELECT ST_Transform(ST_SetSRID(ST_MakePoint(%s, %s), 4326), 3035) as geom),
                                     nearest_road AS (
-                                        SELECT w.geom, ST_ClosestPoint(w.geom, t.geom) as t_pt, ST_ClosestPoint(w.geom, b.geom) as b_pt
-                                        FROM ways w, trafo_pt t, bldg_pt b
-                                        ORDER BY w.geom <-> b.geom LIMIT 1
+                                        SELECT w.geom
+                                        FROM ways w
+                                        WHERE ST_DWithin(w.geom, ST_Transform(ST_SetSRID(ST_MakePoint(%s, %s), 4326), 3035), 1000)
+                                        ORDER BY w.geom <-> ST_Transform(ST_SetSRID(ST_MakePoint(%s, %s), 4326), 3035)
+                                        LIMIT 1
                                     ),
                                     connection AS (
                                         SELECT ST_MakeLine(ARRAY[
-                                            (SELECT geom FROM trafo_pt),
-                                            t_pt, b_pt,
-                                            (SELECT geom FROM bldg_pt)
-                                        ]) as geom FROM nearest_road
+                                            t.geom,
+                                            ST_ClosestPoint(nr.geom, t.geom),
+                                            ST_ClosestPoint(nr.geom, b.geom),
+                                            b.geom
+                                        ]) as geom
+                                        FROM nearest_road nr, trafo_pt t, bldg_pt b
                                     )
                                     SELECT ST_Transform(geom, 4326), ST_Length(geom)/1000.0 FROM connection WHERE geom IS NOT NULL;
-                                """, (t_x, t_y, b_x, b_y))
+                                """, (t_x, t_y, b_x, b_y, b_x, b_y, b_x, b_y))
                                 result = dbc.cur.fetchone()
                                 if result and result[0]:
                                     line_geom = wkb.loads(result[0], hex=True)
                                     length_km = float(result[1]) if result[1] else 0.01
+                                else:
+                                    # No road within 1km of the building.
+                                    line_geom = LineString([(t_x, t_y), (b_x, b_y)])
+                                    length_km = line_geom.length * 111
                             except Exception:
                                 # Fallback to straight line
                                 line_geom = LineString([(t_x, t_y), (b_x, b_y)])
@@ -1150,6 +1159,10 @@ async def generate_grid_phase1(payload: GridRequest):
                                     'geom': line_geom
                                 })
                                 line_id_start += 1
+
+                    loop_elapsed = time.perf_counter() - loop_started
+                    print(f"[Synthetic Lines] Routed {len(reassigned_buildings)} buildings in "
+                          f"{loop_elapsed:.2f}s ({loop_elapsed / max(len(reassigned_buildings), 1):.2f}s each)")
 
                     if synthetic_reassign_lines:
                         reassign_gdf = gpd.GeoDataFrame(synthetic_reassign_lines, geometry='geom', crs='EPSG:4326')
