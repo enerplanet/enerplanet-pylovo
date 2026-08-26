@@ -65,6 +65,22 @@ def _make_direct_connection_line(trafo_geom, building_geom) -> tuple[LineString,
     return line, length_km
 
 
+class _StageTimer:
+    """Records elapsed time between named points in a request."""
+
+    def __init__(self):
+        self._last = time.perf_counter()
+        self._marks = []
+
+    def mark(self, label: str) -> None:
+        now = time.perf_counter()
+        self._marks.append((label, now - self._last))
+        self._last = now
+
+    def summary(self) -> str:
+        return " | ".join(f"{label}={secs:.2f}s" for label, secs in self._marks if secs >= 0.01)
+
+
 def _apply_ai_estimates_to_buildings(buildings: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     """Align initial map values with /estimate-energy so first recalc is stable."""
     if buildings.empty:
@@ -372,6 +388,7 @@ async def generate_grid_phase1(payload: GridRequest):
     dbc = None
     try:
         request_started = time.perf_counter()
+        stages = _StageTimer()
         dbc = DatabaseClient()
         input_srid = infer_input_srid(payload.geom)
         print(f"[Grid Query] Detected input SRID: {input_srid}")
@@ -570,6 +587,7 @@ async def generate_grid_phase1(payload: GridRequest):
                 geom_col="geom"
             )
 
+        stages.mark("buildings")
         # 1b. Custom Buildings
         try:
             dbc.cur.execute("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'custom_buildings');")
@@ -688,7 +706,9 @@ async def generate_grid_phase1(payload: GridRequest):
                 "grids": [],
             }
 
+        stages.mark("custom_buildings")
         buildings = _apply_ai_estimates_to_buildings(buildings)
+        stages.mark("ai_estimates")
 
         buildings["group_id"] = buildings["grid_result_id"]
         grid_ids = buildings["grid_result_id"].unique().tolist()
@@ -860,6 +880,7 @@ async def generate_grid_phase1(payload: GridRequest):
                 print(f"[Custom Buildings] Error reassigning orphaned buildings: {e}")
                 traceback.print_exc()
 
+        stages.mark("transformers")
         # 3. Lines/Cables - filter by polygon to only show cables within the polygon area
         # All lines are stored in EPSG:3035, so we transform polygon to 3035 and filter
 
@@ -949,6 +970,7 @@ async def generate_grid_phase1(payload: GridRequest):
             )
             print(f"[Lines Query] Fallback returned {len(lines)} cables")
 
+        stages.mark("lines")
         # 3b. Generate synthetic LV lines for custom buildings
         try:
             buildings['osm_id_num'] = pd.to_numeric(buildings['osm_id'], errors='coerce')
@@ -998,6 +1020,7 @@ async def generate_grid_phase1(payload: GridRequest):
             print(f"Error generating synthetic LV lines for custom buildings: {e}")
             traceback.print_exc()
 
+        stages.mark("synth_custom")
         # 3c. Generate synthetic LV lines for REASSIGNED regular buildings
         # When a building is reassigned to a user-placed transformer, create a cable to the new transformer
         try:
@@ -1137,6 +1160,7 @@ async def generate_grid_phase1(payload: GridRequest):
             print(f"Error generating synthetic LV lines for reassigned buildings: {e}")
             traceback.print_exc()
 
+        stages.mark("synth_reassigned")
         # 4. MV Lines
         try:
             mv_lines = generate_synthetic_mv_lines(transformers, db_conn=dbc.conn)
@@ -1184,8 +1208,10 @@ async def generate_grid_phase1(payload: GridRequest):
         # Include boundary if available
         if boundary_data:
             response_data["boundary"] = boundary_data
+        stages.mark("serialize")
         total_elapsed = time.perf_counter() - request_started
         print(f"[Timing] /generate-grid completed in {total_elapsed:.2f}s")
+        print(f"[Timing] stages: {stages.summary()}")
         return response_data
 
     except Exception as e:

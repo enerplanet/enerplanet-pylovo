@@ -392,6 +392,7 @@ async def assign_building_to_transformer(payload: dict):
     Creates a cable line from the building to the transformer.
     Uses building_transformer_assignments table for model-specific assignments.
     """
+    request_started = time.perf_counter()
     try:
         building_osm_id = payload.get("building_osm_id")
         target_grid_id = payload.get("target_grid_id")
@@ -662,6 +663,7 @@ async def assign_building_to_transformer(payload: dict):
 
                 conn.commit()
 
+        print(f"[Timing] /assign-building completed in {time.perf_counter() - request_started:.2f}s")
         return {
             "status": "success",
             "building_osm_id": building_osm_id,
