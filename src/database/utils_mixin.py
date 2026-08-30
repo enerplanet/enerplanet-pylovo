@@ -346,6 +346,12 @@ class UtilsMixin(BaseMixin, ABC):
         postcode_table = f"{TARGET_SCHEMA}.postcode"
         state_table = f"{TARGET_SCHEMA}.state"
 
+        # fk_postcode_state_country is table-wide, so every country already in
+        # postcode must have its state rows before it can be added. Callers only
+        # sync the country they are processing, so backfill the rest here or the
+        # constraint fails on a multi-country DB. Idempotent, inserts only gaps.
+        self.sync_states_from_postcodes()
+
         with self.conn.cursor() as cur:
             cur.execute("ALTER TABLE postcode ADD COLUMN IF NOT EXISTS state_code varchar(50);")
             cur.execute(
