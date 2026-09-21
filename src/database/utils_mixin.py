@@ -240,7 +240,13 @@ class UtilsMixin(BaseMixin, ABC):
                     if not state_norm:
                         continue
 
-                    state_name = str((state_cfg or {}).get("name") or state_key).strip()
+                    # regions.yaml names carry an English gloss for the CLI logs
+                    # ("Bayern (Bavaria)"); state_name is a display label.
+                    state_name = re.sub(
+                        r"\s*\([^()]*\)\s*$",
+                        "",
+                        str((state_cfg or {}).get("name") or state_key).strip(),
+                    ).strip()
                     osm_relation_id = (state_cfg or {}).get("osm_relation_id")
                     try:
                         osm_relation_id = int(osm_relation_id) if osm_relation_id is not None else None
@@ -427,7 +433,6 @@ class UtilsMixin(BaseMixin, ABC):
         normalized = {
             "country_code": country_code,
             "normalized_postcode_state_codes": self.normalize_postcode_state_codes(country=country_code),
-            "states_synced_from_regions": self.sync_states_from_regions(country=country_code),
         }
 
         if country_code and state:
@@ -436,6 +441,11 @@ class UtilsMixin(BaseMixin, ABC):
                 state_code=state,
                 state_name=state_name,
             )
+
+        # Runs after ensure_state_entry, whose state_name argument is the CLI
+        # state token rather than a display name, so regions.yaml wins where
+        # it has an entry.
+        normalized["states_synced_from_regions"] = self.sync_states_from_regions(country=country_code)
 
         normalized["states_synced_from_postcodes"] = self.sync_states_from_postcodes(country=country_code)
         self.ensure_postcode_state_fk()
