@@ -693,77 +693,6 @@ async def get_state_boundaries(
     return payload
 
 
-def _load_regions_config() -> dict:
-    """Load and cache regions.yaml configuration."""
-    cache_key = "__regions_yaml__"
-    cached = _get_cached_boundary(cache_key)
-    if cached:
-        return cached
-
-    import yaml
-    from pathlib import Path
-    config_path = Path(__file__).parent.parent.parent / "datapipeline" / "config" / "regions.yaml"
-    if not config_path.exists():
-        return {}
-    with open(config_path) as f:
-        data = yaml.safe_load(f) or {}
-    _set_cached_boundary(cache_key, data)
-    return data
-
-
-def _build_state_osm_lookup(regions_config: dict, country_codes: set) -> dict:
-    """Build OSM relation ID → state metadata for the given country codes.
-
-    Returns: {osm_id: {name, country, country_code, admin_level, osm_type}}
-    """
-    # Well-known country key → ISO 3166-1 alpha-2 mapping
-    _COUNTRY_CODES = {
-        "germany": "DE", "austria": "AT", "switzerland": "CH",
-        "france": "FR", "netherlands": "NL", "belgium": "BE",
-        "poland": "PL", "czech_republic": "CZ", "italy": "IT",
-        "spain": "ES", "denmark": "DK", "luxembourg": "LU",
-        "sweden": "SE", "norway": "NO", "finland": "FI",
-        "portugal": "PT", "ireland": "IE", "united_kingdom": "GB",
-    }
-
-    # Map country_code (DE, NL, …) → country key in regions.yaml
-    cc_to_key = {}
-    for key, val in regions_config.items():
-        if not isinstance(val, dict):
-            continue
-        # 1. Try explicit nuts_code at country level
-        code = None
-        if val.get("nuts_code"):
-            code = val["nuts_code"][:2].upper()
-        # 2. Try well-known mapping
-        if not code:
-            code = _COUNTRY_CODES.get(key.lower())
-        # 3. Try deriving from first state's nuts_code
-        if not code:
-            for state_data in val.get("states", {}).values():
-                if isinstance(state_data, dict) and state_data.get("nuts_code"):
-                    code = state_data["nuts_code"][:2].upper()
-                    break
-        if code and code in country_codes:
-            cc_to_key[code] = key
-
-    lookup = {}
-    for cc, country_key in cc_to_key.items():
-        country_data = regions_config.get(country_key, {})
-        country_name = country_data.get("name", country_key)
-        for _state_key, state_data in country_data.get("states", {}).items():
-            osm_id = state_data.get("osm_relation_id")
-            if osm_id:
-                lookup[osm_id] = {
-                    "name": state_data.get("name", _state_key),
-                    "country": country_name,
-                    "country_code": cc.upper(),
-                    "admin_level": 4,
-                    "osm_type": "relation",
-                }
-    return lookup
-
-
 async def _batch_fetch_boundaries(osm_lookup: dict) -> dict:
     """Fetch boundaries for multiple OSM relations via Nominatim /lookup.
 
@@ -1009,9 +938,8 @@ async def get_available_regions(
     """
     Get regions that have grid data available in the database.
 
-    Returns the bounding box and centroid of each region with generated grids,
-    along with their boundaries fetched via a single Nominatim /lookup call
-    using OSM relation IDs from regions.yaml.
+    Returns the centroid, bounding box and covered-area outline of every region
+    that has generated grids.
     """
     from src.database.database_client import DatabaseClient
     from src.config_loader import VERSION_ID as DEFAULT_VERSION_ID
@@ -1034,7 +962,8 @@ async def get_available_regions(
                        SUM(COALESCE(gc.cnt, 0)) as grid_count,
                        AVG(ST_X(ST_Centroid(pr.geom))) as avg_cx,
                        AVG(ST_Y(ST_Centroid(pr.geom))) as avg_cy,
-                       ST_Extent(pr.geom) as bbox_3035
+                       ST_Extent(pr.geom) as bbox_3035,
+                       ST_UnaryUnion(ST_Collect(pr.geom)) as covered_3035
                 FROM postcode_result pr
                 JOIN gc ON gc.plz = pr.postcode_result_plz
                     AND gc.country_code = pr.country_code
@@ -1066,11 +995,14 @@ async def get_available_regions(
                        a.grid_count,
                        ST_Transform(ST_SetSRID(ST_MakePoint(a.avg_cx, a.avg_cy), 3035), 4326) as centroid,
                        ST_Transform(ST_SetSRID(a.bbox_3035::geometry, 3035), 4326) as bbox,
-                       s.state_name,
+                       ST_Transform(a.covered_3035, 4326) as covered,
+                       COALESCE(s.state_name, a.state_code) as state_name,
+                       c.country_name,
                        s.osm_relation_id,
                        CASE WHEN h.state_code IS NOT NULL THEN true ELSE false END as has_3d
                 FROM agg a
                 LEFT JOIN state s ON a.state_code = s.state_code AND a.country_code = s.country_code
+                LEFT JOIN country c ON a.country_code = c.country_code
                 LEFT JOIN has_3d h ON a.state_code = h.state_code AND a.country_code = h.country_code
             )
             SELECT country_code,
@@ -1083,8 +1015,10 @@ async def get_available_regions(
                    ST_XMax(bbox) as bbox_east,
                    ST_YMax(bbox) as bbox_north,
                    state_name,
+                   country_name,
                    osm_relation_id,
-                   has_3d
+                   has_3d,
+                   ST_AsGeoJSON(covered) as covered_geojson
             FROM transformed
             ORDER BY country_code, state_code
         """, (target_version, target_version, target_version))
@@ -1096,83 +1030,56 @@ async def get_available_regions(
         if not rows:
             return {"status": "success", "regions": []}
 
-        # ── Step 2: collect OSM IDs for boundary fetching ──
-        country_codes = set()
-        state_rows = []
-        osm_ids_needed = set()
+        # boundary is the union of the covered postcode_result geometries, not the
+        # administrative outline: those geometries are clipped to the extent of the
+        # 3D source, so a region's administrative area can be far larger.
+        region_list = []
         for row in rows:
             (country_code, state_code, grid_count, centroid_lon, centroid_lat,
              bbox_west, bbox_south, bbox_east, bbox_north,
-             state_name, osm_relation_id, has_3d) = row
+             state_name, country_name, osm_relation_id, has_3d, covered_geojson) = row
             if centroid_lat is None or centroid_lon is None:
                 continue
-            cc = country_code.upper()
-            country_codes.add(cc)
-            state_rows.append({
-                "cc": cc,
-                "state_code": state_code,
-                "cnt": grid_count,
-                "lat": centroid_lat,
-                "lon": centroid_lon,
-                "bbox": (bbox_west, bbox_south, bbox_east, bbox_north),
-                "state_name": state_name,
-                "osm_relation_id": osm_relation_id,
-                "has_3d": bool(has_3d),
-            })
-            if osm_relation_id:
-                osm_ids_needed.add(osm_relation_id)
 
-        if not state_rows:
-            return {"status": "success", "regions": []}
-
-        # ── Step 3: fetch boundaries from Nominatim via OSM relation IDs ──
-        regions_config = _load_regions_config()
-        osm_lookup = _build_state_osm_lookup(regions_config, country_codes)
-        # Only fetch boundaries for OSM IDs we actually need
-        filtered_osm_lookup = {k: v for k, v in osm_lookup.items() if k in osm_ids_needed}
-        boundaries_by_osm = await _batch_fetch_boundaries(filtered_osm_lookup)
-
-        # ── Step 4: build region list directly from state_code grouping ──
-        region_list = []
-        for item in state_rows:
-            cc = item["cc"]
-            bw, bs, be, bn = item["bbox"]
-            osm_id = item["osm_relation_id"]
-
+            cc = str(country_code or "").upper()
+            region_name = str(state_name or state_code or "Unknown")
+            country_label = country_name or None
             region_info = {
                 "country_code": cc,
-                "state_code": item["state_code"],
-                "grid_count": item["cnt"],
-                "centroid": {"lat": item["lat"], "lon": item["lon"]},
-                "bbox": {"west": bw, "south": bs, "east": be, "north": bn},
-                "has_3d": item["has_3d"],
+                "state_code": state_code,
+                "grid_count": grid_count,
+                "centroid": {"lat": centroid_lat, "lon": centroid_lon},
+                "bbox": {
+                    "west": bbox_west,
+                    "south": bbox_south,
+                    "east": bbox_east,
+                    "north": bbox_north,
+                },
+                "has_3d": bool(has_3d),
+                "region": {
+                    "name": region_name,
+                    "admin_level": 4,
+                    "country": country_label,
+                    "country_code": cc,
+                    "state_code": state_code,
+                    "osm_id": osm_relation_id,
+                    "osm_type": "relation" if osm_relation_id else None,
+                },
+                "boundary": None,
             }
 
-            bdata = boundaries_by_osm.get(osm_id) if osm_id else None
-            if bdata:
-                region_payload = dict(bdata["region"])
-                region_payload["state_code"] = item["state_code"]
-                region_info["region"] = region_payload
-
-                boundary_payload = bdata.get("boundary")
-                if boundary_payload and isinstance(boundary_payload, dict):
-                    boundary_payload = {
-                        **boundary_payload,
-                        "properties": {
-                            **(boundary_payload.get("properties") or {}),
-                            "state_code": item["state_code"],
-                        },
-                    }
-                region_info["boundary"] = boundary_payload
-            elif item["state_name"]:
-                region_info["region"] = {
-                    "name": item["state_name"],
-                    "admin_level": 4,
-                    "country": None,
-                    "country_code": cc,
-                    "state_code": item["state_code"],
-                    "osm_id": osm_id,
-                    "osm_type": "relation" if osm_id else None,
+            if covered_geojson:
+                region_info["boundary"] = {
+                    "type": "Feature",
+                    "properties": {
+                        "name": region_name,
+                        "admin_level": 4,
+                        "country": country_label,
+                        "country_code": cc,
+                        "state_code": state_code,
+                        "source": "postcode_result_covered",
+                    },
+                    "geometry": json.loads(covered_geojson),
                 }
 
             region_list.append(region_info)
