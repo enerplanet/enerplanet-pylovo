@@ -246,6 +246,8 @@ async def get_boundary(
         
         return BoundaryResponse(**result)
         
+    except HTTPException:
+        raise
     except httpx.TimeoutException:
         raise HTTPException(
             status_code=504,

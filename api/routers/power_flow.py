@@ -597,6 +597,8 @@ async def run_power_flow(payload: PowerFlowRequest):
             }
         }
 
+    except HTTPException:
+        raise
     except ImportError:
         raise HTTPException(status_code=500, detail="pandapower not installed")
     except Exception as e:

@@ -350,6 +350,8 @@ async def add_transformer(payload: AddTransformerRequest):
             "message": f"Created transformer at [{lon:.6f}, {lat:.6f}] with {payload.kva} kVA. Reassigned {len(reassigned_buildings)} buildings with {len(new_lines_gdf)} cable connections."
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
@@ -747,6 +749,8 @@ async def delete_transformer(payload: dict):
             "message": f"Deleted transformer {grid_result_id} and reassigned {len(buildings_to_reassign)} buildings."
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
