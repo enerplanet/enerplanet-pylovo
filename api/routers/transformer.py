@@ -41,6 +41,7 @@ async def add_transformer(payload: AddTransformerRequest):
             with conn.cursor() as cur:
                 # Add user_id, model_id, and draft_id columns if they don't exist
                 try:
+                    cur.execute("SET LOCAL lock_timeout = '3s'")
                     cur.execute("ALTER TABLE grid_result ADD COLUMN IF NOT EXISTS user_id VARCHAR(255);")
                     cur.execute("ALTER TABLE grid_result ADD COLUMN IF NOT EXISTS model_id INTEGER;")
                     cur.execute("ALTER TABLE grid_result ADD COLUMN IF NOT EXISTS draft_id VARCHAR(255);")

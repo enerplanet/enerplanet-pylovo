@@ -176,6 +176,7 @@ def _ensure_runtime_schema_once(dbc: DatabaseClient) -> None:
         if _RUNTIME_SCHEMA_READY:
             return
         try:
+            dbc.cur.execute("SET LOCAL lock_timeout = '3s'")
             dbc.cur.execute("ALTER TABLE grid_result ADD COLUMN IF NOT EXISTS user_id VARCHAR(255);")
             dbc.cur.execute("ALTER TABLE grid_result ADD COLUMN IF NOT EXISTS model_id INTEGER;")
             dbc.cur.execute("ALTER TABLE grid_result ADD COLUMN IF NOT EXISTS draft_id VARCHAR(255);")
