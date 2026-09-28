@@ -65,6 +65,22 @@ def _make_direct_connection_line(trafo_geom, building_geom) -> tuple[LineString,
     return line, length_km
 
 
+class _StageTimer:
+    """Records elapsed time between named points in a request."""
+
+    def __init__(self):
+        self._last = time.perf_counter()
+        self._marks = []
+
+    def mark(self, label: str) -> None:
+        now = time.perf_counter()
+        self._marks.append((label, now - self._last))
+        self._last = now
+
+    def summary(self) -> str:
+        return " | ".join(f"{label}={secs:.2f}s" for label, secs in self._marks if secs >= 0.01)
+
+
 def _apply_ai_estimates_to_buildings(buildings: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     """Align initial map values with /estimate-energy so first recalc is stable."""
     if buildings.empty:
@@ -166,8 +182,8 @@ def _build_scope_filter(payload: GridRequest, alias: str) -> tuple[str, list]:
     return " AND ".join(clauses), params
 
 
-def _ensure_runtime_schema_once(dbc: DatabaseClient) -> None:
-    """Run compatibility DDL once per worker to avoid per-request lock/jitter."""
+def ensure_runtime_schema(dbc: DatabaseClient) -> None:
+    """Validate compatibility schema once during worker startup."""
     global _RUNTIME_SCHEMA_READY
     if _RUNTIME_SCHEMA_READY:
         return
@@ -176,7 +192,59 @@ def _ensure_runtime_schema_once(dbc: DatabaseClient) -> None:
         if _RUNTIME_SCHEMA_READY:
             return
         try:
-            dbc.cur.execute("SET LOCAL lock_timeout = '3s'")
+            # The Python lock only coordinates threads in one worker. A
+            # transaction-scoped PostgreSQL advisory lock serializes schema
+            # checks across all API workers and containers.
+            dbc.cur.execute("SET LOCAL lock_timeout = '15s';")
+            dbc.cur.execute("SELECT pg_advisory_xact_lock(7046029254386353131);")
+
+            dbc.cur.execute(
+                """
+                WITH required(table_name, column_name) AS (
+                    VALUES
+                        ('grid_result', 'user_id'),
+                        ('grid_result', 'model_id'),
+                        ('grid_result', 'draft_id'),
+                        ('buildings_result', 'f_classes'),
+                        ('buildings_result', 'height_max'),
+                        ('buildings_result', 'height_ground'),
+                        ('buildings_result', 'height_median'),
+                        ('buildings_result', 'floors_3dbag'),
+                        ('buildings_result', 'bag_id'),
+                        ('buildings_result', 'energy_label'),
+                        ('buildings_result', 'energy_index'),
+                        ('buildings_result', 'cbs_population'),
+                        ('buildings_result', 'cbs_households'),
+                        ('buildings_result', 'cbs_avg_household_size'),
+                        ('res', 'f_classes'),
+                        ('res', 'energy_label'),
+                        ('res', 'energy_index'),
+                        ('oth', 'f_classes'),
+                        ('oth', 'energy_label'),
+                        ('oth', 'energy_index'),
+                        ('equipment_data', 'equipment_only_cost_eur'),
+                        ('equipment_data', 'installed_cost_eur')
+                ),
+                existing AS (
+                    SELECT table_name, column_name
+                    FROM information_schema.columns
+                    WHERE table_schema = ANY(current_schemas(FALSE))
+                )
+                SELECT
+                    NOT EXISTS (
+                        SELECT table_name, column_name FROM required
+                        EXCEPT
+                        SELECT table_name, column_name FROM existing
+                    )
+                    AND to_regclass('building_transformer_assignments') IS NOT NULL;
+                """
+            )
+            if dbc.cur.fetchone()[0]:
+                dbc.conn.commit()
+                _RUNTIME_SCHEMA_READY = True
+                print("[Schema] Runtime schema already current")
+                return
+
             dbc.cur.execute("ALTER TABLE grid_result ADD COLUMN IF NOT EXISTS user_id VARCHAR(255);")
             dbc.cur.execute("ALTER TABLE grid_result ADD COLUMN IF NOT EXISTS model_id INTEGER;")
             dbc.cur.execute("ALTER TABLE grid_result ADD COLUMN IF NOT EXISTS draft_id VARCHAR(255);")
@@ -221,6 +289,7 @@ def _ensure_runtime_schema_once(dbc: DatabaseClient) -> None:
         except Exception as schema_err:
             dbc.conn.rollback()
             print(f"[Schema] Runtime schema check failed: {schema_err}")
+            raise
 
 
 def _fetch_state_boundary_bbox_for_centroid(dbc: DatabaseClient, lon: float, lat: float) -> dict | None:
@@ -316,10 +385,11 @@ async def generate_grid_phase1(payload: GridRequest):
     GeoPandas script so that Pylovo returns exactly the same
     buildings for a given polygon.
     """
+    dbc = None
     try:
         request_started = time.perf_counter()
+        stages = _StageTimer()
         dbc = DatabaseClient()
-        _ensure_runtime_schema_once(dbc)
         input_srid = infer_input_srid(payload.geom)
         print(f"[Grid Query] Detected input SRID: {input_srid}")
 
@@ -517,6 +587,7 @@ async def generate_grid_phase1(payload: GridRequest):
                 geom_col="geom"
             )
 
+        stages.mark("buildings")
         # 1b. Custom Buildings
         try:
             dbc.cur.execute("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'custom_buildings');")
@@ -635,7 +706,9 @@ async def generate_grid_phase1(payload: GridRequest):
                 "grids": [],
             }
 
+        stages.mark("custom_buildings")
         buildings = _apply_ai_estimates_to_buildings(buildings)
+        stages.mark("ai_estimates")
 
         buildings["group_id"] = buildings["grid_result_id"]
         grid_ids = buildings["grid_result_id"].unique().tolist()
@@ -807,6 +880,7 @@ async def generate_grid_phase1(payload: GridRequest):
                 print(f"[Custom Buildings] Error reassigning orphaned buildings: {e}")
                 traceback.print_exc()
 
+        stages.mark("transformers")
         # 3. Lines/Cables - filter by polygon to only show cables within the polygon area
         # All lines are stored in EPSG:3035, so we transform polygon to 3035 and filter
 
@@ -830,11 +904,13 @@ async def generate_grid_phase1(payload: GridRequest):
                 dbc.cur.execute(f"""
                     SELECT DISTINCT br.vertice_id, br.grid_result_id as original_grid
                     FROM building_transformer_assignments bta
-                    JOIN buildings_result br ON bta.building_osm_id = br.osm_id
+                    JOIN buildings_result br
+                      ON br.version_id = %s
+                     AND br.osm_id = bta.building_osm_id
                     WHERE ({reassign_where})
                       AND br.vertice_id IS NOT NULL
                       AND bta.grid_result_id != br.grid_result_id;
-                """, reassign_params)
+                """, [VERSION_ID] + reassign_params)
                 reassigned_data = dbc.cur.fetchall()
                 reassigned_vertices = [(row[0], row[1]) for row in reassigned_data if row[0] is not None]
                 print(f"[Lines Query] Found {len(reassigned_vertices)} reassigned building vertices to exclude")
@@ -894,6 +970,7 @@ async def generate_grid_phase1(payload: GridRequest):
             )
             print(f"[Lines Query] Fallback returned {len(lines)} cables")
 
+        stages.mark("lines")
         # 3b. Generate synthetic LV lines for custom buildings
         try:
             buildings['osm_id_num'] = pd.to_numeric(buildings['osm_id'], errors='coerce')
@@ -943,6 +1020,7 @@ async def generate_grid_phase1(payload: GridRequest):
             print(f"Error generating synthetic LV lines for custom buildings: {e}")
             traceback.print_exc()
 
+        stages.mark("synth_custom")
         # 3c. Generate synthetic LV lines for REASSIGNED regular buildings
         # When a building is reassigned to a user-placed transformer, create a cable to the new transformer
         try:
@@ -978,11 +1056,13 @@ async def generate_grid_phase1(payload: GridRequest):
                            br.grid_result_id AS original_grid_id,
                            ST_Transform(br.geom, 4326) AS geom
                     FROM building_transformer_assignments bta
-                    JOIN buildings_result br ON bta.building_osm_id = br.osm_id
+                    JOIN buildings_result br
+                      ON br.version_id = %s
+                     AND br.osm_id = bta.building_osm_id
                     JOIN grid_result gr ON bta.grid_result_id = gr.grid_result_id
                     WHERE {' AND '.join(reassign_conditions)};
                 """
-                dbc.cur.execute(reassign_sql, tuple(reassign_params))
+                dbc.cur.execute(reassign_sql, tuple([VERSION_ID] + reassign_params))
                 reassign_rows = dbc.cur.fetchall()
 
                 if reassign_rows:
@@ -1005,6 +1085,7 @@ async def generate_grid_phase1(payload: GridRequest):
                 if not reassigned_buildings.empty:
                     synthetic_reassign_lines = []
                     line_id_start = lines['line_id'].max() + 1 if not lines.empty and 'line_id' in lines.columns else 200000
+                    loop_started = time.perf_counter()
 
                     for idx, bldg in reassigned_buildings.iterrows():
                         new_grid_id = bldg.get('new_grid_id')
@@ -1038,23 +1119,31 @@ async def generate_grid_phase1(payload: GridRequest):
                                     WITH trafo_pt AS (SELECT ST_Transform(ST_SetSRID(ST_MakePoint(%s, %s), 4326), 3035) as geom),
                                     bldg_pt AS (SELECT ST_Transform(ST_SetSRID(ST_MakePoint(%s, %s), 4326), 3035) as geom),
                                     nearest_road AS (
-                                        SELECT w.geom, ST_ClosestPoint(w.geom, t.geom) as t_pt, ST_ClosestPoint(w.geom, b.geom) as b_pt
-                                        FROM ways w, trafo_pt t, bldg_pt b
-                                        ORDER BY w.geom <-> b.geom LIMIT 1
+                                        SELECT w.geom
+                                        FROM ways w
+                                        WHERE ST_DWithin(w.geom, ST_Transform(ST_SetSRID(ST_MakePoint(%s, %s), 4326), 3035), 1000)
+                                        ORDER BY w.geom <-> ST_Transform(ST_SetSRID(ST_MakePoint(%s, %s), 4326), 3035)
+                                        LIMIT 1
                                     ),
                                     connection AS (
                                         SELECT ST_MakeLine(ARRAY[
-                                            (SELECT geom FROM trafo_pt),
-                                            t_pt, b_pt,
-                                            (SELECT geom FROM bldg_pt)
-                                        ]) as geom FROM nearest_road
+                                            t.geom,
+                                            ST_ClosestPoint(nr.geom, t.geom),
+                                            ST_ClosestPoint(nr.geom, b.geom),
+                                            b.geom
+                                        ]) as geom
+                                        FROM nearest_road nr, trafo_pt t, bldg_pt b
                                     )
                                     SELECT ST_Transform(geom, 4326), ST_Length(geom)/1000.0 FROM connection WHERE geom IS NOT NULL;
-                                """, (t_x, t_y, b_x, b_y))
+                                """, (t_x, t_y, b_x, b_y, b_x, b_y, b_x, b_y))
                                 result = dbc.cur.fetchone()
                                 if result and result[0]:
                                     line_geom = wkb.loads(result[0], hex=True)
                                     length_km = float(result[1]) if result[1] else 0.01
+                                else:
+                                    # No road within 1km of the building.
+                                    line_geom = LineString([(t_x, t_y), (b_x, b_y)])
+                                    length_km = line_geom.length * 111
                             except Exception:
                                 # Fallback to straight line
                                 line_geom = LineString([(t_x, t_y), (b_x, b_y)])
@@ -1071,6 +1160,10 @@ async def generate_grid_phase1(payload: GridRequest):
                                 })
                                 line_id_start += 1
 
+                    loop_elapsed = time.perf_counter() - loop_started
+                    print(f"[Synthetic Lines] Routed {len(reassigned_buildings)} buildings in "
+                          f"{loop_elapsed:.2f}s ({loop_elapsed / max(len(reassigned_buildings), 1):.2f}s each)")
+
                     if synthetic_reassign_lines:
                         reassign_gdf = gpd.GeoDataFrame(synthetic_reassign_lines, geometry='geom', crs='EPSG:4326')
                         lines = pd.concat([lines, reassign_gdf], ignore_index=True)
@@ -1080,6 +1173,7 @@ async def generate_grid_phase1(payload: GridRequest):
             print(f"Error generating synthetic LV lines for reassigned buildings: {e}")
             traceback.print_exc()
 
+        stages.mark("synth_reassigned")
         # 4. MV Lines
         try:
             mv_lines = generate_synthetic_mv_lines(transformers, db_conn=dbc.conn)
@@ -1127,21 +1221,26 @@ async def generate_grid_phase1(payload: GridRequest):
         # Include boundary if available
         if boundary_data:
             response_data["boundary"] = boundary_data
+        stages.mark("serialize")
         total_elapsed = time.perf_counter() - request_started
         print(f"[Timing] /generate-grid completed in {total_elapsed:.2f}s")
+        print(f"[Timing] stages: {stages.summary()}")
         return response_data
 
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if dbc is not None:
+            dbc.close()
 
 
 @router.post("/grid-statistics")
 async def get_grid_statistics(payload: GridStatisticsRequest):
     """Get detailed statistics for specified grid result IDs"""
+    dbc = None
     try:
         dbc = DatabaseClient()
-        _ensure_runtime_schema_once(dbc)
         grid_ids = payload.grid_result_ids
 
         if not grid_ids:
@@ -1321,3 +1420,6 @@ async def get_grid_statistics(payload: GridStatisticsRequest):
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if dbc is not None:
+            dbc.close()

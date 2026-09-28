@@ -1,5 +1,6 @@
 """Transformer management endpoints."""
 import json
+import math
 import time
 import traceback
 
@@ -13,6 +14,46 @@ from src.database.connection_pool import get_connection
 router = APIRouter(tags=["transformer"])
 
 VERSION_ID = "1"
+FULL_WAYS_SQL = (
+    "SELECT way_id AS id, source, target, cost, reverse_cost FROM ways WHERE cost > 0"
+)
+
+
+def _corridor_ways_sql(x1: float, y1: float, x2: float, y2: float,
+                       min_buffer_m: float = 2000.0) -> str:
+    """Edge SQL for pgr_dijkstra limited to ways near the (x1,y1)-(x2,y2) line."""
+    buffer_m = max(min_buffer_m, math.hypot(x2 - x1, y2 - y1))
+    return (
+        f"{FULL_WAYS_SQL} AND ST_DWithin(geom, ST_SetSRID(ST_MakeLine("
+        f"ST_MakePoint({x1}, {y1}), ST_MakePoint({x2}, {y2})), 3035), {buffer_m})"
+    )
+
+
+def _routing_graphs(x1: float, y1: float, x2: float, y2: float) -> list:
+    """Corridor graph first, full graph as fallback when no route is found."""
+    return [_corridor_ways_sql(x1, y1, x2, y2), FULL_WAYS_SQL]
+
+
+def _require_transformer_schema(cur) -> None:
+    """Verify the transformer scope schema."""
+    cur.execute(
+        """
+        SELECT
+            (
+                SELECT COUNT(DISTINCT column_name) = 3
+                FROM information_schema.columns
+                WHERE table_schema = ANY(current_schemas(FALSE))
+                  AND table_name = 'grid_result'
+                  AND column_name = ANY(ARRAY['user_id', 'model_id', 'draft_id'])
+            )
+            AND to_regclass('building_transformer_assignments') IS NOT NULL;
+        """
+    )
+    if not cur.fetchone()[0]:
+        raise HTTPException(
+            status_code=503,
+            detail="Transformer database schema is not ready",
+        )
 
 
 @router.post("/add-transformer")
@@ -27,6 +68,7 @@ async def add_transformer(payload: AddTransformerRequest):
 
     Returns updated grid data including the new transformer and reassigned buildings.
     """
+    dbc = None
     try:
         if len(payload.coordinates) != 2:
             raise HTTPException(status_code=400, detail="Coordinates must be [longitude, latitude]")
@@ -39,15 +81,11 @@ async def add_transformer(payload: AddTransformerRequest):
 
         with get_connection() as conn:
             with conn.cursor() as cur:
-                # Add user_id, model_id, and draft_id columns if they don't exist
-                try:
-                    cur.execute("SET LOCAL lock_timeout = '3s'")
-                    cur.execute("ALTER TABLE grid_result ADD COLUMN IF NOT EXISTS user_id VARCHAR(255);")
-                    cur.execute("ALTER TABLE grid_result ADD COLUMN IF NOT EXISTS model_id INTEGER;")
-                    cur.execute("ALTER TABLE grid_result ADD COLUMN IF NOT EXISTS draft_id VARCHAR(255);")
-                    conn.commit()
-                except Exception:
-                    conn.rollback()
+                # DDL must never run in a request. Even IF NOT EXISTS requires
+                # an AccessExclusiveLock and can queue the whole API behind a
+                # long-running read transaction.
+                cur.execute("SET LOCAL lock_timeout = '5s';")
+                _require_transformer_schema(cur)
 
                 # Generate unique OSM ID for the new transformer
                 new_osm_id = f"user/{int(time.time() * 1000)}"
@@ -126,23 +164,6 @@ async def add_transformer(payload: AddTransformerRequest):
 
                     if buildings_to_reassign:
                         osm_ids_to_reassign = [row[0] for row in buildings_to_reassign]
-
-                        # Ensure building_transformer_assignments table exists
-                        cur.execute("""
-                            CREATE TABLE IF NOT EXISTS building_transformer_assignments (
-                                assignment_id SERIAL PRIMARY KEY,
-                                building_osm_id VARCHAR NOT NULL,
-                                grid_result_id BIGINT NOT NULL,
-                                user_id VARCHAR(255),
-                                model_id INTEGER,
-                                draft_id VARCHAR(255),
-                                version_id VARCHAR(10) DEFAULT '1',
-                                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                            );
-                            CREATE INDEX IF NOT EXISTS idx_bta_building ON building_transformer_assignments (building_osm_id);
-                            CREATE INDEX IF NOT EXISTS idx_bta_model ON building_transformer_assignments (model_id);
-                            CREATE INDEX IF NOT EXISTS idx_bta_draft ON building_transformer_assignments (draft_id);
-                        """)
 
                         # Insert assignments into the new table (model-specific, not global)
                         for osm_id in osm_ids_to_reassign:
@@ -234,32 +255,36 @@ async def add_transformer(payload: AddTransformerRequest):
                                         line_geom_wkt = result[0]
                                         length_km = float(result[1]) if result[1] else 0.01
                                 else:
-                                    cur.execute("""
-                                        WITH route AS (
-                                            SELECT ST_LineMerge(ST_Union(w.geom ORDER BY r.path_seq)) AS route_geom
-                                            FROM pgr_dijkstra(
-                                                'SELECT way_id AS id, source, target, cost, reverse_cost FROM ways',
-                                                %s, %s, directed := false
-                                            ) r
-                                            JOIN ways w ON r.edge = w.way_id
-                                            WHERE r.edge > 0
-                                        ),
-                                        trafo_pt AS (SELECT ST_SetSRID(ST_MakePoint(%s, %s), 3035) as geom),
-                                        bldg_pt AS (SELECT ST_SetSRID(ST_MakePoint(%s, %s), 3035) as geom),
-                                        full_connection AS (
-                                            SELECT ST_LineMerge(ST_Union(ARRAY[
-                                                ST_MakeLine(t.geom, ST_StartPoint(r.route_geom)),
-                                                r.route_geom,
-                                                ST_MakeLine(ST_EndPoint(r.route_geom), b.geom)
-                                            ])) as geom
-                                            FROM route r, trafo_pt t, bldg_pt b
-                                            WHERE r.route_geom IS NOT NULL
-                                        )
-                                        SELECT ST_AsText(geom), ST_Length(geom) / 1000.0 as length_km
-                                        FROM full_connection
-                                        WHERE geom IS NOT NULL;
-                                    """, (start_v, end_v, trafo_x, trafo_y, bldg_x, bldg_y))
-                                    result = cur.fetchone()
+                                    result = None
+                                    for ways_sql in _routing_graphs(trafo_x, trafo_y, bldg_x, bldg_y):
+                                        cur.execute(f"""
+                                            WITH route AS (
+                                                SELECT ST_LineMerge(ST_Union(w.geom ORDER BY r.path_seq)) AS route_geom
+                                                FROM pgr_dijkstra(
+                                                    '{ways_sql.replace("'", "''")}',
+                                                    %s, %s, directed := false
+                                                ) r
+                                                JOIN ways w ON r.edge = w.way_id
+                                                WHERE r.edge > 0
+                                            ),
+                                            trafo_pt AS (SELECT ST_SetSRID(ST_MakePoint(%s, %s), 3035) as geom),
+                                            bldg_pt AS (SELECT ST_SetSRID(ST_MakePoint(%s, %s), 3035) as geom),
+                                            full_connection AS (
+                                                SELECT ST_LineMerge(ST_Union(ARRAY[
+                                                    ST_MakeLine(t.geom, ST_StartPoint(r.route_geom)),
+                                                    r.route_geom,
+                                                    ST_MakeLine(ST_EndPoint(r.route_geom), b.geom)
+                                                ])) as geom
+                                                FROM route r, trafo_pt t, bldg_pt b
+                                                WHERE r.route_geom IS NOT NULL
+                                            )
+                                            SELECT ST_AsText(geom), ST_Length(geom) / 1000.0 as length_km
+                                            FROM full_connection
+                                            WHERE geom IS NOT NULL;
+                                        """, (start_v, end_v, trafo_x, trafo_y, bldg_x, bldg_y))
+                                        result = cur.fetchone()
+                                        if result and result[0]:
+                                            break
                                     if result and result[0]:
                                         line_geom_wkt = result[0]
                                         length_km = float(result[1]) if result[1] else 0.01
@@ -355,6 +380,9 @@ async def add_transformer(payload: AddTransformerRequest):
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if dbc is not None:
+            dbc.close()
 
 
 @router.post("/assign-building")
@@ -364,6 +392,7 @@ async def assign_building_to_transformer(payload: dict):
     Creates a cable line from the building to the transformer.
     Uses building_transformer_assignments table for model-specific assignments.
     """
+    request_started = time.perf_counter()
     try:
         building_osm_id = payload.get("building_osm_id")
         target_grid_id = payload.get("target_grid_id")
@@ -382,19 +411,7 @@ async def assign_building_to_transformer(payload: dict):
 
         with get_connection() as conn:
             with conn.cursor() as cur:
-                # Ensure building_transformer_assignments table exists
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS building_transformer_assignments (
-                        assignment_id SERIAL PRIMARY KEY,
-                        building_osm_id VARCHAR NOT NULL,
-                        grid_result_id BIGINT NOT NULL,
-                        user_id VARCHAR(255),
-                        model_id INTEGER,
-                        draft_id VARCHAR(255),
-                        version_id VARCHAR(10) DEFAULT '1',
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    );
-                """)
+                _require_transformer_schema(cur)
 
                 cur.execute("""
                     SELECT br.grid_result_id,
@@ -540,23 +557,26 @@ async def assign_building_to_transformer(payload: dict):
                             print(f"[Assign Building] Direct path via road, length: {length_km:.3f} km")
                     else:
                         # Get routed path geometry using pgr_dijkstra
-                        cur.execute("""
-                            WITH route AS (
-                                SELECT edge, path_seq
-                                FROM pgr_dijkstra(
-                                    'SELECT way_id AS id, source, target, cost, reverse_cost FROM ways WHERE cost > 0',
-                                    %s, %s, directed := false
+                        route_result = None
+                        for ways_sql in _routing_graphs(bldg_x, bldg_y, trafo_x, trafo_y):
+                            cur.execute(f"""
+                                WITH route AS (
+                                    SELECT edge, path_seq
+                                    FROM pgr_dijkstra(
+                                        '{ways_sql.replace("'", "''")}',
+                                        %s, %s, directed := false
+                                    )
+                                    WHERE edge != -1
                                 )
-                                WHERE edge != -1
-                            )
-                            SELECT 
-                                ST_AsText(ST_LineMerge(ST_Union(w.geom ORDER BY r.path_seq))) AS route_wkt,
-                                ST_Length(ST_LineMerge(ST_Union(w.geom ORDER BY r.path_seq))) / 1000.0 AS length_km
-                            FROM route r
-                            JOIN ways w ON r.edge = w.way_id;
-                        """, (bldg_node_id, trafo_node_id))
-                        
-                        route_result = cur.fetchone()
+                                SELECT 
+                                    ST_AsText(ST_LineMerge(ST_Union(w.geom ORDER BY r.path_seq))) AS route_wkt,
+                                    ST_Length(ST_LineMerge(ST_Union(w.geom ORDER BY r.path_seq))) / 1000.0 AS length_km
+                                FROM route r
+                                JOIN ways w ON r.edge = w.way_id;
+                            """, (bldg_node_id, trafo_node_id))
+                            route_result = cur.fetchone()
+                            if route_result and route_result[0]:
+                                break
                         print(f"[Assign Building] Route result: {route_result}")
                         
                         if route_result and route_result[0]:
@@ -643,6 +663,7 @@ async def assign_building_to_transformer(payload: dict):
 
                 conn.commit()
 
+        print(f"[Timing] /assign-building completed in {time.perf_counter() - request_started:.2f}s")
         return {
             "status": "success",
             "building_osm_id": building_osm_id,

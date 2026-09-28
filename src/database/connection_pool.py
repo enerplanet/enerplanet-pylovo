@@ -71,12 +71,21 @@ def get_connection():
     """
     pool = get_pool()
     conn = None
+    discard = False
     try:
         conn = pool.getconn()
+        conn.rollback()
         yield conn
     finally:
         if conn is not None:
-            pool.putconn(conn)
+            try:
+                if not conn.closed:
+                    conn.rollback()
+                else:
+                    discard = True
+            except Exception:
+                discard = True
+            pool.putconn(conn, close=discard)
 
 
 @contextmanager
