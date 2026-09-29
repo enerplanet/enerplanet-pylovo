@@ -168,6 +168,7 @@ def main():
     parser.add_argument("state", help="State name (e.g. hamburg, flevoland)")
     parser.add_argument("--worker", type=int, default=1, help="Number of worker processes")
     parser.add_argument("--resume", action="store_true", help="Skip PLZs that already have grid results")
+    parser.add_argument("--plz", nargs="+", help="Only generate grids for these PLZs (must belong to the state)")
     
     args = parser.parse_args()
     country = args.country.lower()
@@ -291,6 +292,13 @@ def main():
     with dbc.conn.cursor() as cur:
         cur.execute(query, tuple(params))
         plzs = [row[0] for row in cur.fetchall()]
+
+    if args.plz:
+        unknown = sorted(set(args.plz) - set(plzs))
+        if unknown:
+            print(f"Error: PLZs {unknown} have no building data in {state_name}.")
+            return
+        plzs = list(args.plz)
     
     # Sort PLZs by population descending so largest areas start first (better load-balancing)
     try:
