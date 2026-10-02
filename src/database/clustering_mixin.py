@@ -6,7 +6,10 @@ from decimal import *
 from typing import *
 
 import numpy as np
+import pandas as pd
+import scipy.sparse
 from scipy.cluster.hierarchy import cut_tree
+from scipy.sparse.csgraph import dijkstra
 
 from src import utils
 from src.config_loader import *
@@ -211,20 +214,65 @@ class ClusteringMixin(BaseMixin, ABC):
         Returns: The distance matrix of the buildings in the k-means cluster as np.array and the mapping between vertice_id and local ID as dict
         """
 
-        costmatrix_query = """SELECT * \
-                              FROM pgr_dijkstraCostMatrix( \
-                                      'SELECT way_id as id, source, target, cost, reverse_cost FROM ways_tem', \
-                                      (SELECT array_agg(DISTINCT b.connection_point) \
-                                       FROM (SELECT * \
-                                             FROM buildings_tem \
-                                             WHERE kcid = %(k)s \
-                                               AND bcid ISNULL \
-                                             ORDER BY connection_point) AS b), \
-                                      false);"""
-        params = {"k": kcid}
-        localid2vid, dist_mat, _ = self.calculate_cost_arr_dist_matrix(costmatrix_query, params)
+        self.cur.execute(
+            """SELECT DISTINCT connection_point
+               FROM buildings_tem
+               WHERE kcid = %(k)s
+                 AND bcid ISNULL
+                 AND connection_point IS NOT NULL;""",
+            {"k": kcid},
+        )
+        return self.street_distance_matrix([row[0] for row in self.cur.fetchall()])
 
-        return localid2vid, dist_mat, _
+    def street_distance_matrix(self, points: list[int], chunk_size: int = 256) -> tuple[dict, np.ndarray, dict]:
+        """Return the undirected street-distance matrix between ``points`` (vertices of ``ways_tem``).
+
+        Same result as ``calculate_cost_arr_dist_matrix`` over ``pgr_dijkstraCostMatrix``: vertices
+        ordered by id, points that reach no other point dropped, 0 for pairs without a path. Computed
+        with scipy so the dense n x n matrix is never built inside PostgreSQL, where it exhausted the
+        server's memory on large kcids. Ported from tum-ens/pylovo@d13e085.
+
+        Args:
+            points: Vertex ids.
+            chunk_size: Source vertices per Dijkstra call (memory: chunk_size x vertices floats).
+
+        Returns:
+            ``(localid2vid, dist_matrix, vid2localid)``.
+        """
+        self.cur.execute("""SELECT source, target, cost, reverse_cost
+                            FROM ways_tem
+                            WHERE source IS NOT NULL AND target IS NOT NULL;""")
+        edges = np.asarray(self.cur.fetchall(), dtype=float).reshape(-1, 4)
+        vertices = np.unique(edges[:, :2])
+        source = np.searchsorted(vertices, edges[:, 0])
+        target = np.searchsorted(vertices, edges[:, 1])
+        # An edge is usable with the smaller of its non-negative costs; parallel edges keep
+        # their minimum instead of being summed by the sparse matrix.
+        weight = np.fmin(np.where(edges[:, 2] >= 0, edges[:, 2], np.inf),
+                         np.where(edges[:, 3] >= 0, edges[:, 3], np.inf))
+        keep = (source != target) & np.isfinite(weight)
+        pairs = pd.DataFrame({"a": np.minimum(source, target)[keep], "b": np.maximum(source, target)[keep],
+                              "w": weight[keep]}).groupby(["a", "b"], sort=True)["w"].min()
+        graph = scipy.sparse.csr_matrix(
+            (pairs.to_numpy(), (pairs.index.get_level_values("a"), pairs.index.get_level_values("b"))),
+            shape=(len(vertices), len(vertices)),
+        )
+
+        points = np.asarray(sorted(int(p) for p in points), dtype=np.int64)
+        points = points[np.isin(points, vertices)]
+        point_index = np.searchsorted(vertices, points)
+        distances = np.vstack(
+            [dijkstra(graph, directed=False, indices=point_index[i:i + chunk_size])[:, point_index]
+             for i in range(0, len(point_index), chunk_size)]
+        ) if len(point_index) else np.zeros((0, 0))
+        np.fill_diagonal(distances, np.inf)
+        connected = np.isfinite(distances).any(axis=1)
+        distances = distances[np.ix_(connected, connected)]
+        dist_matrix = self._canonicalize_distance_matrix(np.where(np.isfinite(distances), distances, 0.0))
+
+        localid2vid = dict(enumerate(points[connected].astype(np.int32)))
+        vid2localid = {y: x for x, y in localid2vid.items()}
+        return localid2vid, dist_matrix, vid2localid
 
     def calculate_cost_arr_dist_matrix(self, costmatrix_query: str, params: dict) -> tuple[dict, np.ndarray, dict]:
         """
