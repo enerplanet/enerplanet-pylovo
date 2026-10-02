@@ -118,6 +118,8 @@ def process_plz(args):
             refresh_mv=False,
             raise_on_error=True,
         )
+        if not gg.dbc.is_grid_generated(plz, country_code):
+            raise RuntimeError(f"no grid_result rows for PLZ {plz} ({country_code}) after generation")
         _update_status("success")
 
         return f"PLZ {plz}: Success"

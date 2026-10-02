@@ -548,7 +548,7 @@ class ClusteringMixin(BaseMixin, ABC):
         kcid_length = self.cur.fetchone()[0]
         return kcid_length
 
-    def get_next_unfinished_kcid(self, plz: int, country_code: str = "DE") -> int | None:
+    def get_next_unfinished_kcid(self, plz: int, country_code: str = "DE", exclude: list[int] | None = None) -> int | None:
         """
         :return: one unmodeled k mean cluster ID - plz
         """
@@ -560,9 +560,10 @@ class ClusteringMixin(BaseMixin, ABC):
                                         AND grid_result.plz = %(plz)s
                                         AND grid_result.country_code = %(cc)s)
                      AND kcid IS NOT NULL
+                     AND NOT (kcid = ANY(%(exclude)s))
                    ORDER BY kcid
                    LIMIT 1;"""
-        self.cur.execute(query, {"v": VERSION_ID, "plz": plz, "cc": country_code})
+        self.cur.execute(query, {"v": VERSION_ID, "plz": plz, "cc": country_code, "exclude": list(exclude or [])})
         row = self.cur.fetchone()
         return row[0] if row else None
 

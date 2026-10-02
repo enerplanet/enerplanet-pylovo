@@ -629,12 +629,16 @@ class GridGenerator:
         INTO: buildings_tem, grid_result
         """
         kcid_length = self.dbc.get_kcid_length()
+        # A kcid can finish without a grid_result row; excluding attempted kcids
+        # stops it from being picked again and starving the kcids after it.
+        attempted_kcids = []
 
         for _ in range(kcid_length):
-            kcid = self.dbc.get_next_unfinished_kcid(self.plz, self.country_code)
+            kcid = self.dbc.get_next_unfinished_kcid(self.plz, self.country_code, exclude=attempted_kcids)
             if kcid is None:
                 self.logger.debug("No unfinished kcids remain for plz %s.", self.plz)
                 break
+            attempted_kcids.append(kcid)
             self.current_stage = f"position_all_transformers:kcid={kcid}"
             self.current_stage_started_at = time.time()
             self.logger.debug(f"working on kcid {kcid}")
@@ -759,6 +763,32 @@ class GridGenerator:
         dist_vector = squareform(dist_mat)
 
         if len(dist_vector) == 0:
+            # Consumers sharing one connection point give no pair to cluster; they
+            # become one bcid. Ported from tum-ens/pylovo@2503a3e.
+            vertices = sorted(buildings["connection_point"].dropna().astype(int).unique().tolist())
+            if len(vertices) == 1:
+                total_sim_load = utils.simultaneousPeakLoad(buildings, consumer_cat_df, vertices)
+                required_kva = utils.required_apparent_power_kva(
+                    total_sim_load, DEFAULT_POWER_FACTOR, TRANSFORMER_LOADING_MARGIN
+                )
+                feasible = transformer_capacities[transformer_capacities >= required_kva]
+                transformer_size = int(feasible[0]) if len(feasible) else int(math.ceil(required_kva))
+                self.dbc.clear_grid_result_in_kmean_cluster(
+                    plz, kcid, only_greenfield=False, country_code=self.country_code
+                )
+                self.dbc.upsert_bcid(
+                    plz, kcid, 1, vertices=vertices,
+                    transformer_rated_power=transformer_size, country_code=self.country_code,
+                )
+                self.logger.info(
+                    "Single connection point in PLZ %s KCID %s assigned to BCID 1 with %s kVA",
+                    plz, kcid, transformer_size,
+                )
+                return
+            self.logger.warning(
+                "Skipped BCID dimensioning for PLZ %s KCID %s: no routable pair among %s connection points",
+                plz, kcid, len(vertices),
+            )
             return
 
         # Initialize hierarchical clustering
