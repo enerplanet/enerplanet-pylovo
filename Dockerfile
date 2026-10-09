@@ -1,5 +1,5 @@
 # Use an official Python runtime as a parent image
-FROM python:3.10-slim
+FROM python:3.12-slim
 
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1
@@ -15,7 +15,9 @@ ENV TERM=xterm-256color
 # osmium-tool is needed for OSM data processing
 # gdal-bin (ogr2ogr) is needed for geospatial conversions
 # default-jre is needed for osm2po (Java)
+# git is needed to install occupancy from its release tag
 RUN apt-get update && apt-get install -y \
+    git \
     gcc \
     g++ \
     libpq-dev \

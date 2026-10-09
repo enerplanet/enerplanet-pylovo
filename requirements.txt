@@ -35,3 +35,5 @@ httpx>=0.25.0
 laspy[lazrs]==2.7.0
 rasterstats==0.20.0
 pyarrow==19.0.1
+# Same release as BuEM's pin; api/main.py checks the installed version at startup.
+occupancy @ git+https://github.com/enerplanet/occupancy.git@v6.2.0-enerplanet.1

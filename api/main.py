@@ -1,5 +1,6 @@
 import sys
 import os
+from importlib.metadata import version
 from pathlib import Path
 # Add project root and api directory to python path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # api/ directory
@@ -32,9 +33,25 @@ app.include_router(building.router)
 app.include_router(grid.router)
 app.include_router(boundary.router)
 
+# Package version of the occupancy tag pinned in requirements.txt; the two must
+# change together. Git tag vX.Y.Z-enerplanet.N carries version X.Y.Z+enerplanet.N.
+OCCUPANCY_VERSION = "6.2.0+enerplanet.1"
+
+
+def check_occupancy_version() -> None:
+    """Refuse to start when the installed occupancy release is not the pinned one."""
+    installed = version("occupancy")
+    if installed != OCCUPANCY_VERSION:
+        raise RuntimeError(
+            f"occupancy {installed} is installed, but pylovo requires {OCCUPANCY_VERSION}; "
+            "rebuild the image from requirements.txt"
+        )
+
+
 @app.on_event("startup")
 async def startup_event():
     """Initialize connection pool and Redis cache on startup."""
+    check_occupancy_version()
     init_pool()
     # Compatibility DDL is serialized here before the worker accepts traffic;
     # request handlers never perform schema changes.
