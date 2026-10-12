@@ -82,14 +82,16 @@ class SiteMixin(BaseMixin, ABC):
         """Attach each site station to its nearest road vertex; return how many stay unattached.
 
         set_vertice_id only attaches transformers lying within 1 m of a vertex,
-        and stations get no connection line, so site stations snap instead,
-        like the greenfield transformers placed on a vertex.
+        and stations get no connection line, so site stations snap instead.
+        clazz 110 segments are building service lines, not roads.
         """
         self.cur.execute(
             """UPDATE buildings_tem b
                SET vertice_id = (
                        SELECT v.id FROM ways_tem_vertices_pgr v
                        WHERE ST_DWithin(v.geom, b.center, %(d)s)
+                         AND EXISTS (SELECT 1 FROM ways_tem w
+                                     WHERE w.clazz != 110 AND v.id IN (w.source, w.target))
                        ORDER BY v.geom <-> b.center LIMIT 1
                    )
                WHERE b.type = 'Transformer' AND b.osm_id LIKE 'site_transformer:%%'
