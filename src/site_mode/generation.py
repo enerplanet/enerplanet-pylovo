@@ -2,6 +2,7 @@
 from typing import Callable
 
 from src.database.database_client import DatabaseClient
+from src.database.database_constructor import DatabaseConstructor
 from src.grid_generator import GridGenerator
 from src.site_mode.sites import site_plz
 
@@ -32,6 +33,17 @@ LEFT JOIN site_transformer st
        ON st.site_id = %(site)s AND st.transformer_id = l.site_transformer_id
 WHERE gr.plz = %(plz)s;
 """
+
+
+def _ensure_ways_functions(dbc: DatabaseClient) -> None:
+    """Install the ways preprocessing functions if the database lacks them.
+
+    The constructor installs them, but a database restored from a data dump,
+    such as a deployment fixture, may not have them.
+    """
+    dbc.cur.execute("SELECT to_regprocedure('segment_intersecting_ways()') IS NOT NULL")
+    if not dbc.cur.fetchone()[0]:
+        DatabaseConstructor(dbc).load_ways_preprocessing_functions()
 
 
 def _site_country(dbc: DatabaseClient, site_id: int) -> str:
@@ -76,6 +88,7 @@ def generate_site(site_id: int, revision: int,
     """
     plz = site_plz(site_id)
     with DatabaseClient() as dbc:
+        _ensure_ways_functions(dbc)
         country_code = _site_country(dbc, site_id)
         dbc.cur.execute(RESET_POSTCODE_SQL, {"plz": plz, "site": site_id})
         dbc.conn.commit()
