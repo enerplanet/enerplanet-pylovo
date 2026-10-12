@@ -1,4 +1,6 @@
 """Generate a site's grid from its copied inputs with pylovo's normal algorithm."""
+from typing import Callable
+
 from src.database.database_client import DatabaseClient
 from src.grid_generator import GridGenerator
 from src.site_mode.sites import site_plz
@@ -61,13 +63,16 @@ def _record_results(dbc: DatabaseClient, site_id: int, revision: int, brownfield
     return overloaded
 
 
-def generate_site(site_id: int, revision: int) -> dict:
+def generate_site(site_id: int, revision: int,
+                  on_generator: Callable[[GridGenerator], None] | None = None) -> dict:
     """Replace the site's grid with one generated from its current inputs.
 
     Returns overloaded_transformer_ids (site stations whose fixed buildings
     exceed their known rating) and unroutable_building_ids (fixed assignments
     that could not be cabled along the street network, so the building was
-    assigned automatically). Raises on any generation error, leaving no result.
+    assigned automatically). on_generator, if given, receives the GridGenerator
+    so a caller can read its current_stage. Raises on any generation error,
+    leaving no result.
     """
     plz = site_plz(site_id)
     with DatabaseClient() as dbc:
@@ -75,6 +80,8 @@ def generate_site(site_id: int, revision: int) -> dict:
         dbc.cur.execute(RESET_POSTCODE_SQL, {"plz": plz, "site": site_id})
         dbc.conn.commit()
     generator = GridGenerator(plz=plz, country_code=country_code, site_id=site_id)
+    if on_generator is not None:
+        on_generator(generator)
     try:
         generator.generate_grid_for_single_plz(plz, analyze_grids=False, raise_on_error=True)
         overloaded = _record_results(generator.dbc, site_id, revision, generator.site_brownfield)

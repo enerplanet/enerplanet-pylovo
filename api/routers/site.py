@@ -10,7 +10,7 @@ from fastapi import APIRouter, HTTPException, Response
 
 from models.site import BuildingPatch, CreateSiteRequest, SiteTransformerInput
 from src.database.connection_pool import get_cursor
-from src.site_mode import buildings, sites, transformers
+from src.site_mode import buildings, jobs, sites, transformers
 from src.site_mode.errors import SiteError
 
 router = APIRouter(prefix="/sites", tags=["site"])
@@ -87,3 +87,19 @@ def replace_transformers(site_id: int, payload: List[SiteTransformerInput]):
     with site_cursor() as cur:
         revision = transformers.replace_transformers(cur, site_id, items)
         return {"revision": revision, "transformers": transformers.list_transformers(cur, site_id)}
+
+
+@router.post("/{site_id}/generate", status_code=202)
+def generate(site_id: int):
+    """Queue generation of the site's current revision; 409 while another job is active."""
+    with site_cursor() as cur:
+        job = jobs.queue_job(cur, site_id)
+    jobs.start_job_process(job["job_id"])
+    return job
+
+
+@router.get("/{site_id}/jobs/{job_id}")
+def get_job(site_id: int, job_id: int):
+    """Return a generation job's status and result."""
+    with site_cursor() as cur:
+        return jobs.get_job(cur, site_id, job_id)
