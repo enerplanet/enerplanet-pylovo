@@ -35,7 +35,7 @@ app.include_router(boundary.router)
 
 # Package version of the occupancy tag pinned in requirements.txt; the two must
 # change together. Git tag vX.Y.Z-enerplanet.N carries version X.Y.Z+enerplanet.N.
-OCCUPANCY_VERSION = "6.2.0+enerplanet.1"
+OCCUPANCY_VERSION = "6.3.0+enerplanet.1"
 
 
 def check_occupancy_version() -> None:
