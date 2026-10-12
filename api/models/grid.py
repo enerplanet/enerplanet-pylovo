@@ -16,3 +16,6 @@ class GridRequest(BaseModel):
 
 class GridStatisticsRequest(BaseModel):
     grid_result_ids: List[int]
+    # Site grids: both required together; the grids must be of this generated revision
+    site_id: Optional[int] = None
+    revision: Optional[int] = None

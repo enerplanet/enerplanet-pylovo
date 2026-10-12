@@ -10,7 +10,9 @@ from fastapi import APIRouter, HTTPException, Response
 
 from models.site import BuildingPatch, CreateSiteRequest, SiteTransformerInput
 from src.database.connection_pool import get_cursor
-from src.site_mode import buildings, jobs, sites, transformers
+from models import GridRequest
+from routers.grid import build_grid_response
+from src.site_mode import buildings, grid_view, jobs, sites, transformers
 from src.site_mode.errors import SiteError
 
 router = APIRouter(prefix="/sites", tags=["site"])
@@ -103,3 +105,15 @@ def get_job(site_id: int, job_id: int):
     """Return a generation job's status and result."""
     with site_cursor() as cur:
         return jobs.get_job(cur, site_id, job_id)
+
+
+@router.get("/{site_id}/grid")
+def get_grid(site_id: int):
+    """Return the site's generated grid in the /generate-grid shape, plus site fields and meta."""
+    with site_cursor() as cur:
+        site = sites.get_site(cur, site_id)
+        if site["generated_revision"] is None:
+            raise HTTPException(status_code=404, detail=f"Site {site_id} has no generated grid")
+    response = build_grid_response(GridRequest(geom=site["geom"]), site_plz=sites.site_plz(site_id))
+    with site_cursor() as cur:
+        return grid_view.site_grid(cur, site_id, response)

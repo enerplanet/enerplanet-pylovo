@@ -4,9 +4,9 @@ import json
 from src.site_mode.errors import SiteValidationError
 from src.site_mode.sites import bump_revision, lock_site_for_edit
 
-# Mirrors set_building_peak_load (preprocessing_mixin.py) for one building:
-# class normalisation, the household estimate and the per-category peak.
-# Change both together.
+# Mirrors set_building_peak_load (preprocessing_mixin.py) for the peak and
+# the yearly_demand_kwh expression of build_grid_response (api/routers/grid.py)
+# for the yearly figure. Change them together.
 BUILDINGS_SQL = """
 WITH b AS (
     SELECT sb.*, ST_Area(sb.geom) AS a, COALESCE(sb.floors, 1) AS fl,
@@ -22,6 +22,9 @@ WITH b AS (
                               ELSE GREATEST(1, floor(b.a / 90) * b.fl) END
                     ELSE 1 END) AS hh,
            def.peak_load AS def_peak, def.peak_load_per_m2 AS def_per_m2,
+           COALESCE(cc.load_method, def.load_method, 'area') = 'household' AS yearly_per_household,
+           COALESCE(cc.yearly_consumption, def.yearly_consumption, 0) AS yearly_household_kwh,
+           b.a * COALESCE(cc.yearly_consumption_per_m2, def.yearly_consumption_per_m2, 0) AS yearly_area_kwh,
            cc.definition IS NOT NULL AS has_cc
     FROM b
     LEFT JOIN consumer_categories cc ON cc.definition = b.fc
@@ -38,7 +41,11 @@ SELECT building_id, osm_id, fc, a, ST_AsGeoJSON(ST_Transform(geom, 4326)), hh,
        (SELECT COALESCE(json_agg(json_build_object('category', l.category, 'kw', l.kw)
                                  ORDER BY l.category), '[]'::json)
         FROM site_building_load l
-        WHERE l.site_id = %(site)s AND l.building_id = d.building_id)
+        WHERE l.site_id = %(site)s AND l.building_id = d.building_id),
+       CASE WHEN yearly_per_household THEN hh * yearly_household_kwh ELSE yearly_area_kwh END,
+       COALESCE(measured_yearly_kwh,
+                CASE WHEN yearly_per_household THEN COALESCE(dwellings, hh) * yearly_household_kwh
+                     ELSE yearly_area_kwh END)
 FROM d ORDER BY building_id;
 """
 
@@ -59,7 +66,8 @@ def list_buildings(cur, site_id: int) -> dict:
     for row in cur.fetchall():
         properties = {
             "building_id": row[0], "osm_id": row[1], "f_class": row[2], "area_m2": row[3],
-            "defaults": {"dwellings": row[5], "peak_kw": row[6]},
+            "defaults": {"dwellings": row[5], "peak_kw": row[6], "yearly_kwh": row[12]},
+            "yearly_kwh_used": row[13],
             "overrides": _overrides(row),
         }
         features.append({"type": "Feature", "geometry": json.loads(row[4]), "properties": properties})
