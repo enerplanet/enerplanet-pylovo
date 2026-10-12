@@ -14,6 +14,7 @@ from models import GridRequest, GridStatisticsRequest
 from src.ai_estimation import estimate_building_energy
 from src.database.database_client import DatabaseClient
 from src.config_loader import CABLE_COST_DICT, VN, V_BAND_LOW, V_BAND_HIGH
+from config.config_table_structure import CREATE_QUERIES, SITE_TABLES
 from services.mv_lines import generate_synthetic_mv_lines
 from utils.helpers import infer_input_srid
 
@@ -236,7 +237,8 @@ def ensure_runtime_schema(dbc: DatabaseClient) -> None:
                         EXCEPT
                         SELECT table_name, column_name FROM existing
                     )
-                    AND to_regclass('building_transformer_assignments') IS NOT NULL;
+                    AND to_regclass('building_transformer_assignments') IS NOT NULL
+                    AND to_regclass('site_job') IS NOT NULL;
                 """
             )
             if dbc.cur.fetchone()[0]:
@@ -283,6 +285,8 @@ def ensure_runtime_schema(dbc: DatabaseClient) -> None:
             dbc.cur.execute("ALTER TABLE IF EXISTS oth ADD COLUMN IF NOT EXISTS energy_index DOUBLE PRECISION;")
             dbc.cur.execute("ALTER TABLE IF EXISTS equipment_data ADD COLUMN IF NOT EXISTS equipment_only_cost_eur INTEGER;")
             dbc.cur.execute("ALTER TABLE IF EXISTS equipment_data ADD COLUMN IF NOT EXISTS installed_cost_eur INTEGER;")
+            for table_name in SITE_TABLES:
+                dbc.cur.execute(CREATE_QUERIES[table_name])
             dbc.conn.commit()
             _RUNTIME_SCHEMA_READY = True
             print("[Schema] Runtime schema checks completed")
