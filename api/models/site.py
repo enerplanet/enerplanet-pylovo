@@ -28,7 +28,7 @@ class BuildingOverrides(BaseModel):
     """Site-specific demand data; replaces the building's previous overrides."""
     measured_peak_kw: Optional[float] = Field(default=None, gt=0)
     measured_yearly_kwh: Optional[float] = Field(default=None, ge=0)
-    dwellings: Optional[float] = Field(default=None, gt=0)
+    dwellings: Optional[int] = Field(default=None, gt=0)
     extra_loads: List[ExtraLoad] = Field(default_factory=list)
     excluded: bool = False
 

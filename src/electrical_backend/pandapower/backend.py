@@ -50,6 +50,7 @@ class PandapowerBackend(IElectricalBackend):
         self.net = None
         self._circuit_name = None
         self._bus_cache: Dict[str, int] = {}
+        self._fixed_trafos: set = set()
 
     def initialize_circuit(
         self, name: str, source_bus: str, primary_kv: float,
@@ -59,6 +60,7 @@ class PandapowerBackend(IElectricalBackend):
             self.net = pp.create_empty_network(name=name)
             self._circuit_name = name
             self._bus_cache = {}
+            self._fixed_trafos = set()
         except Exception as e:
             self.logger.error(f"Failed to initialize circuit: {e}")
             raise PandapowerBackendError(f"Circuit initialization failed: {e}") from e
@@ -161,6 +163,8 @@ class PandapowerBackend(IElectricalBackend):
                 parallel=spec.parallel
             )
         
+        if spec.fixed_rating:
+            self._fixed_trafos.add(trafo_idx)
         self.logger.debug(f"Created transformer: {spec.name} (kva={spec.kva})")
         return trafo_idx
 
@@ -458,6 +462,7 @@ class PandapowerBackend(IElectricalBackend):
         overloaded_trafos = []
         if hasattr(self.net, "res_trafo") and not self.net.res_trafo.empty and "loading_percent" in self.net.res_trafo.columns:
             overloaded_trafos = self.net.res_trafo[self.net.res_trafo["loading_percent"] > 100.0].index.tolist()
+        overloaded_trafos = [idx for idx in overloaded_trafos if idx not in self._fixed_trafos]
 
         lines_to_upgrade = set(int(idx) for idx in overloaded_lines)
         if low_voltage_buses:

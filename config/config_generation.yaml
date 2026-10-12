@@ -27,7 +27,7 @@ ELECTRICAL_BACKEND: pandapower
 VERSION_ID: "1" # Change version if you changed any grid parameters or queries (e.g. transformer query)
 VERSION_COMMENT: base version # State here which parameters, queries are used to compute the grids with current VERSION_ID
 PEAK_LOAD_HOUSEHOLD: 14.50 # default: 14.5kW, 30 kW if electric hot water supply is included
-SIM_FACTOR: {residential: 0.07, public: 0.60, commercial: 0.50, industrial: 0.60, agricultural: 0.60, infrastructure: 0.60} # Simultaneous load factor per parent_category
+SIM_FACTOR: {residential: 0.07, public: 0.60, commercial: 0.50, industrial: 0.60, agricultural: 0.60, infrastructure: 0.60, measured: 1.00, heat_pump: 1.00} # Simultaneous load factor per parent_category
 DEFAULT_POWER_FACTOR: 0.95  # cos(phi) for residential loads
 AUTO_REGISTER_MISSING_F_CLASSES: True  # Auto-create consumer_categories rows for unseen f_class values
 F_CLASS_AUDIT_WARN_THRESHOLD: 0.001  # Warn if uncovered building share exceeds 0.1%
@@ -258,6 +258,11 @@ CONSUMER_CATEGORIES:
   - {consumer_category_id: 373, definition: dance,               load_method: area, parent_category: commercial,  peak_load: null, yearly_consumption: null, peak_load_per_m2: 40.00, yearly_consumption_per_m2: 160.00, sim_factor: 0.50}
   # Tourism POIs
   - {consumer_category_id: 380, definition: gallery,             load_method: area, parent_category: public,      peak_load: null, yearly_consumption: null, peak_load_per_m2: 25.00, yearly_consumption_per_m2: 100.00, sim_factor: 0.60}
+  # ── Site mode (set by overrides, never by OSM) ──
+  # A measured peak is already coincident, so it is not diversified again.
+  - {consumer_category_id: 900, definition: measured_peak,      load_method: area, parent_category: measured,  peak_load: null, yearly_consumption: null, peak_load_per_m2: 0.00,  yearly_consumption_per_m2: 0.00,   sim_factor: 1.00}
+  # Heat pumps are not diversified (1.00); no published coincidence factor is applied.
+  - {consumer_category_id: 901, definition: heat_pump,          load_method: area, parent_category: heat_pump, peak_load: null, yearly_consumption: null, peak_load_per_m2: 0.00,  yearly_consumption_per_m2: 0.00,   sim_factor: 1.00}
   # ── Fallback row for any f_class not listed above ──
   - {consumer_category_id: 999, definition: _default,           load_method: area, parent_category: commercial, peak_load: null, yearly_consumption: null, peak_load_per_m2: 29.00, yearly_consumption_per_m2: 155.70, sim_factor: 0.50}
 

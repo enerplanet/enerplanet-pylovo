@@ -931,6 +931,7 @@ class ClusteringMixin(BaseMixin, ABC):
         bcid: int,
         note: int,
         country_code: str = "DE",
+        use_existing_capacity: bool = True,
     ):
         """
         Update the field transformer_rated_power in grid_result for a given building cluster (bcid).
@@ -959,7 +960,10 @@ class ClusteringMixin(BaseMixin, ABC):
         None. Performs an in‑place database update.
         """
         # First check if there's an existing transformer with a specific capacity
-        existing_capacity = self.get_existing_transformer_capacity_trafo_ui(plz, kcid, bcid)
+        # Site mode passes False: the lookup reads the shared transformers table.
+        existing_capacity = (
+            self.get_existing_transformer_capacity_trafo_ui(plz, kcid, bcid) if use_existing_capacity else None
+        )
         if existing_capacity is not None:
             # Use the existing transformer capacity
             update_query = """UPDATE grid_result
@@ -1057,7 +1061,7 @@ class ClusteringMixin(BaseMixin, ABC):
         return np.array(capacities), transformer2cost
 
     def update_building_cluster(self, transformer_id: int, conn_id_list: Union[list, tuple], count: int, kcid: int,
-            plz: int, transformer_rated_power: int, country_code: str = "DE") -> None:
+            plz: int, transformer_rated_power: int, country_code: str = "DE") -> str:
         """
         Update building cluster information by performing multiple operations:
           - Update the 'bcid' in 'buildings_tem' where 'vertice_id' matches the transformer_id.
@@ -1155,13 +1159,18 @@ class ClusteringMixin(BaseMixin, ABC):
                 f"Transformer vertex {transformer_id} not found in buildings_tem (plz={plz}, kcid={kcid})."
             )
 
+        # osm_id references the shared transformers table; site stations are not
+        # in it, so their key is returned to the caller instead of stored.
+        station_key = transformer_row[1]
+        stored_osm_id = None if str(station_key).startswith("site_transformer:") else station_key
         self.cur.execute(
             """
             INSERT INTO transformer_positions (version_id, grid_result_id, geom, osm_id, comment)
             VALUES (%s, %s, %s, %s, 'Normal');
             """,
-            (VERSION_ID, grid_result_id, transformer_row[0], transformer_row[1]),
+            (VERSION_ID, grid_result_id, transformer_row[0], stored_osm_id),
         )
+        return station_key
 
     def calculate_sim_load(self, conn_list: Union[tuple, list]) -> Decimal:
         if not conn_list:

@@ -13,7 +13,7 @@ from fastapi import APIRouter, HTTPException
 from models import GridRequest, GridStatisticsRequest
 from src.ai_estimation import estimate_building_energy
 from src.database.database_client import DatabaseClient
-from src.config_loader import CABLE_COST_DICT, VN, V_BAND_LOW, V_BAND_HIGH
+from src.config_loader import CABLE_COST_DICT, CONSUMER_CATEGORIES, VN, V_BAND_LOW, V_BAND_HIGH
 from config.config_table_structure import CREATE_QUERIES, SITE_TABLES
 from services.mv_lines import generate_synthetic_mv_lines
 from utils.helpers import infer_input_srid
@@ -238,7 +238,8 @@ def ensure_runtime_schema(dbc: DatabaseClient) -> None:
                         SELECT table_name, column_name FROM existing
                     )
                     AND to_regclass('building_transformer_assignments') IS NOT NULL
-                    AND to_regclass('site_job') IS NOT NULL;
+                    AND to_regclass('site_grid_transformer') IS NOT NULL
+                    AND EXISTS (SELECT 1 FROM consumer_categories WHERE definition = 'heat_pump');
                 """
             )
             if dbc.cur.fetchone()[0]:
@@ -287,6 +288,9 @@ def ensure_runtime_schema(dbc: DatabaseClient) -> None:
             dbc.cur.execute("ALTER TABLE IF EXISTS equipment_data ADD COLUMN IF NOT EXISTS installed_cost_eur INTEGER;")
             for table_name in SITE_TABLES:
                 dbc.cur.execute(CREATE_QUERIES[table_name])
+            # Site extra loads reference categories that exist only in the config
+            # until a generation run upserts them.
+            dbc.insert_consumer_categories_from_config(consumer_categories=CONSUMER_CATEGORIES)
             dbc.conn.commit()
             _RUNTIME_SCHEMA_READY = True
             print("[Schema] Runtime schema checks completed")

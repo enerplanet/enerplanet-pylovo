@@ -646,7 +646,7 @@ CREATE_QUERIES = {
         cbs_avg_household_size double precision,
         measured_peak_kw double precision CHECK (measured_peak_kw > 0),
         measured_yearly_kwh double precision CHECK (measured_yearly_kwh >= 0),
-        dwellings double precision CHECK (dwellings > 0),
+        dwellings integer CHECK (dwellings > 0),
         excluded boolean NOT NULL DEFAULT FALSE,
         PRIMARY KEY (site_id, building_id)
     );
@@ -698,12 +698,23 @@ CREATE_QUERIES = {
         stage varchar(100),
         error text,
         overloaded_transformer_ids integer[],
+        unroutable_building_ids integer[],
         created_at timestamptz NOT NULL DEFAULT NOW(),
         started_at timestamptz,
         finished_at timestamptz,
         heartbeat_at timestamptz
     );
     CREATE INDEX IF NOT EXISTS idx_site_job_site ON site_job (site_id, job_id DESC);
+    """,
+    # Recorded at generation time, so a later rating edit does not relabel an old grid.
+    "site_grid_transformer": """
+    CREATE TABLE IF NOT EXISTS site_grid_transformer (
+        grid_result_id integer PRIMARY KEY REFERENCES grid_result (grid_result_id) ON DELETE CASCADE,
+        site_id integer NOT NULL REFERENCES site (site_id) ON DELETE CASCADE,
+        site_transformer_id integer,
+        origin varchar(5) NOT NULL CHECK (origin IN ('known', 'osm', 'user', 'new')),
+        loading_pct double precision
+    );
     """,
 }
 
@@ -714,6 +725,7 @@ SITE_TABLES = (
     "site_transformer",
     "site_transformer_assignment",
     "site_job",
+    "site_grid_transformer",
 )
 SITE_PLZ_PREFIX = "S"
 
