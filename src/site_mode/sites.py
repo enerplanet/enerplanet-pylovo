@@ -91,6 +91,7 @@ def create_site(cur, user_id: str, name: str, country_code: str, geom: dict) -> 
         raise SiteError(f"No {country_code} buildings inside the site polygon; is the region loaded?")
     if building_count > MAX_SITE_BUILDINGS:
         raise SiteError(f"Site holds {building_count} buildings; the limit is {MAX_SITE_BUILDINGS}")
+    cur.execute("UPDATE site SET last_building_id = %s WHERE site_id = %s", (building_count, site_id))
     cur.execute(COPY_TRANSFORMERS_SQL, {"site": site_id})
     return {"site_id": site_id, "revision": 1, "building_count": building_count,
             "transformer_count": cur.rowcount}

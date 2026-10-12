@@ -25,8 +25,10 @@ class SiteMixin(BaseMixin, ABC):
                     floors_3dbag, bag_id, energy_label, energy_index, cbs_population,
                     cbs_households, cbs_avg_household_size, construction_year)
                 SELECT {SITE_BUILDING_KEY}, sb.area,
-                       CASE sb.kind WHEN 'res' THEN sb.building_t ELSE sb.use END,
-                       sb.f_class, COALESCE(NULLIF(sb.f_classes, ''), sb.f_class),
+                       COALESCE(CASE sb.kind WHEN 'res' THEN sb.building_t ELSE sb.use END,
+                                COALESCE(sb.f_class_override, sb.f_class)),
+                       COALESCE(sb.f_class_override, sb.f_class),
+                       COALESCE(sb.f_class_override, NULLIF(sb.f_classes, ''), sb.f_class),
                        sb.geom, ST_Centroid(sb.geom),
                        CASE sb.kind WHEN 'res' THEN COALESCE(sb.floors, 1) ELSE 1 END,
                        COALESCE(sb.dwellings, CASE sb.kind WHEN 'res' THEN sb.occupants::int END),

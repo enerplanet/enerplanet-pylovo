@@ -22,7 +22,8 @@ def _demand_source(overrides: dict | None) -> str:
         return "default"
     if overrides["measured_peak_kw"] is not None:
         return "measured_peak"
-    return "override" if overrides["dwellings"] is not None or overrides["extra_loads"] else "default"
+    changed = overrides["dwellings"] is not None or overrides["extra_loads"] or overrides["f_class"]
+    return "override" if changed else "default"
 
 
 def _site_buildings(features: list, site_buildings: dict) -> list:
@@ -42,6 +43,9 @@ def _site_buildings(features: list, site_buildings: dict) -> list:
             "building_id": building_id,
             "osm_id": site_building["osm_id"],
             "f_class": site_building["f_class"],
+            "source": site_building["source"],
+            "source_id": site_building["source_id"],
+            "f_class_confirmed": site_building["f_class_confirmed"],
             "peak_kw_used": props["peak_load_in_kw"] + extra_kw.get(building_id, 0.0),
             "demand_source": _demand_source(site_building["overrides"]),
             "yearly_demand_kwh": site_building["yearly_kwh_used"],

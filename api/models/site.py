@@ -31,6 +31,16 @@ class BuildingOverrides(BaseModel):
     dwellings: Optional[int] = Field(default=None, gt=0)
     extra_loads: List[ExtraLoad] = Field(default_factory=list)
     excluded: bool = False
+    f_class: Optional[str] = Field(default=None, min_length=1, max_length=80)
+
+
+class AddedBuilding(BaseModel):
+    """A building from a 3D source that matches no OSM building."""
+    geom: SiteGeometry
+    source: Literal["city2tabula"]
+    source_id: str = Field(min_length=1, max_length=200)
+    f_class: str = Field(default="yes", min_length=1, max_length=80)
+    floors: Optional[int] = Field(default=None, gt=0)
 
 
 class BuildingPatch(BaseModel):

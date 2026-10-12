@@ -16,12 +16,19 @@ from config.config_table_structure import CREATE_QUERIES, SITE_TABLES
 from src import utils
 from src.config_loader import CONSUMER_CATEGORIES, DBNAME, DBUSER, HOST, PASSWORD, PORT, TARGET_SCHEMA
 from src.database.database_client import DatabaseClient
-from src.site_mode import buildings, sites, transformers
+from src.site_mode import added_buildings, buildings, sites, transformers
 from src.site_mode.errors import SiteValidationError
 from src.site_mode.generation import generate_site
 
 TEST_POLYGON = {"type": "Polygon", "coordinates": [[
     [8.8058, 53.0907], [8.8094, 53.0907], [8.8094, 53.0930], [8.8058, 53.0930], [8.8058, 53.0907]]]}
+
+# Open ground inside TEST_POLYGON, more than 15 m from any building.
+FREE_FOOTPRINT = {"type": "Polygon", "coordinates": [[
+    [8.80678, 53.09232], [8.80690, 53.09232], [8.80690, 53.09239], [8.80678, 53.09239], [8.80678, 53.09232]]]}
+
+NO_OVERRIDES = {"measured_peak_kw": None, "measured_yearly_kwh": None, "dwellings": None,
+                "extra_loads": [], "excluded": False, "f_class": None}
 
 SHARED_TABLES_SQL = """
 SELECT md5(string_agg(osm_id || f_class || ST_AsText(geom), ',' ORDER BY osm_id, f_class)) FROM res
@@ -76,8 +83,7 @@ class SiteModeTest(unittest.TestCase):
 
     def test_extra_loads_with_measured_peak_are_rejected(self):
         """A measured peak may already contain an extra load, so the two cannot be combined."""
-        overrides = {"measured_peak_kw": 40.0, "measured_yearly_kwh": None, "dwellings": None,
-                     "extra_loads": [{"category": "heat_pump", "kw": 9.0}], "excluded": False}
+        overrides = dict(NO_OVERRIDES, measured_peak_kw=40.0, extra_loads=[{"category": "heat_pump", "kw": 9.0}])
         with self.assertRaises(SiteValidationError):
             buildings.patch_buildings(self.cur, self.site_id, [{"building_id": 1, "overrides": overrides}])
 
@@ -91,9 +97,8 @@ class SiteModeTest(unittest.TestCase):
             (self.site_id, station["transformer_id"]),
         )
         nearest = self.cur.fetchone()[0]
-        buildings.patch_buildings(self.cur, self.site_id, [{"building_id": nearest, "overrides": {
-            "measured_peak_kw": 150.0, "measured_yearly_kwh": None, "dwellings": None,
-            "extra_loads": [], "excluded": False}}])
+        buildings.patch_buildings(self.cur, self.site_id, [{"building_id": nearest, "overrides": dict(
+            NO_OVERRIDES, measured_peak_kw=150.0)}])
         transformers.replace_transformers(self.cur, self.site_id, [{
             "transformer_id": station["transformer_id"], "geom": station["geom"], "rated_kva": 100,
             "assigned_building_ids": [nearest]}])
@@ -110,6 +115,42 @@ class SiteModeTest(unittest.TestCase):
             (self.site_id, station["transformer_id"], f"site:{self.site_id}:{nearest}"),
         )
         self.assertEqual(self.cur.fetchone(), (100, 150.0))
+
+    def _add_free_building(self) -> int:
+        """Add one 3D-only building on open ground with two floors; return its building_id."""
+        result = added_buildings.add_buildings(self.cur, self.site_id, [{
+            "geom": FREE_FOOTPRINT, "source": "city2tabula", "source_id": "unittest-3d-1",
+            "f_class": "yes", "floors": 2}])
+        self.conn.commit()
+        return result["buildings"][0]["properties"]["building_id"]
+
+    def test_added_building_is_connected_with_default_demand(self):
+        """A 3D-only building has no OSM type, yet it is cabled and keeps its default peak."""
+        building_id = self._add_free_building()
+        generate_site(self.site_id, self._site_revision())
+        self.cur.execute("SELECT vertice_id IS NOT NULL, peak_load_in_kw FROM buildings_result WHERE osm_id = %s",
+                         (f"site:{self.site_id}:{building_id}",))
+        self.assertEqual(self.cur.fetchone(), (True, 29.0))
+
+    def test_f_class_override_changes_default_demand(self):
+        """An office is sized by floor area, not by households."""
+        building_id = self._add_free_building()
+        buildings.patch_buildings(self.cur, self.site_id, [{"building_id": building_id,
+                                                            "overrides": dict(NO_OVERRIDES, f_class="office")}])
+        props = next(f["properties"] for f in buildings.list_buildings(self.cur, self.site_id)["features"]
+                     if f["properties"]["building_id"] == building_id)
+        self.assertTrue(props["f_class_confirmed"])
+        self.assertAlmostEqual(props["defaults"]["peak_kw"], props["area_m2"] * 55.0 / 1000)
+
+    def test_deleted_building_id_is_not_reused(self):
+        """Building ids stay stable: a new building never takes a deleted one's id."""
+        first = self._add_free_building()
+        added_buildings.delete_building(self.cur, self.site_id, first)
+        self.conn.commit()
+        second = self._add_free_building()
+        self.assertGreater(second, first)
+        with self.assertRaises(SiteValidationError):
+            added_buildings.delete_building(self.cur, self.site_id, 1)
 
     def test_generation_leaves_shared_tables_unchanged(self):
         """A site reads its own copy; res, oth and transformers are never written."""

@@ -8,11 +8,11 @@ from typing import List
 
 from fastapi import APIRouter, HTTPException, Response
 
-from models.site import BuildingPatch, CreateSiteRequest, SiteTransformerInput
+from models.site import AddedBuilding, BuildingPatch, CreateSiteRequest, SiteTransformerInput
 from src.database.connection_pool import get_cursor
 from models import GridRequest
 from routers.grid import build_grid_response
-from src.site_mode import buildings, grid_view, jobs, sites, transformers
+from src.site_mode import added_buildings, buildings, grid_view, jobs, sites, transformers
 from src.site_mode.errors import SiteError
 
 router = APIRouter(prefix="/sites", tags=["site"])
@@ -72,6 +72,21 @@ def patch_buildings(site_id: int, payload: List[BuildingPatch]):
     patches = [p.model_dump() for p in payload]
     with site_cursor() as cur:
         return {"revision": buildings.patch_buildings(cur, site_id, patches)}
+
+
+@router.post("/{site_id}/buildings", status_code=201)
+def add_buildings(site_id: int, payload: List[AddedBuilding]):
+    """Add buildings from a 3D source that match no OSM building."""
+    items = [i.model_dump() for i in payload]
+    with site_cursor() as cur:
+        return added_buildings.add_buildings(cur, site_id, items)
+
+
+@router.delete("/{site_id}/buildings/{building_id}")
+def delete_building(site_id: int, building_id: int):
+    """Remove an added building; OSM-copied buildings are excluded instead."""
+    with site_cursor() as cur:
+        return {"revision": added_buildings.delete_building(cur, site_id, building_id)}
 
 
 @router.get("/{site_id}/transformers")

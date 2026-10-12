@@ -614,6 +614,7 @@ CREATE_QUERIES = {
         geom geometry(MultiPolygon, 3035) NOT NULL,
         revision integer NOT NULL DEFAULT 1,
         generated_revision integer,
+        last_building_id integer NOT NULL DEFAULT 0,
         created_at timestamptz NOT NULL DEFAULT NOW(),
         updated_at timestamptz NOT NULL DEFAULT NOW()
     );
@@ -648,7 +649,11 @@ CREATE_QUERIES = {
         measured_yearly_kwh double precision CHECK (measured_yearly_kwh >= 0),
         dwellings integer CHECK (dwellings > 0),
         excluded boolean NOT NULL DEFAULT FALSE,
-        PRIMARY KEY (site_id, building_id)
+        f_class_override varchar(80),
+        source varchar(12) NOT NULL DEFAULT 'osm' CHECK (source IN ('osm', 'city2tabula')),
+        source_id varchar,
+        PRIMARY KEY (site_id, building_id),
+        UNIQUE (site_id, source, source_id)
     );
     CREATE INDEX IF NOT EXISTS idx_site_building_geom ON site_building USING GIST (geom);
     """,

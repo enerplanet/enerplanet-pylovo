@@ -10,9 +10,10 @@ from src.site_mode.sites import bump_revision, lock_site_for_edit
 BUILDINGS_SQL = """
 WITH b AS (
     SELECT sb.*, ST_Area(sb.geom) AS a, COALESCE(sb.floors, 1) AS fl,
-           CASE WHEN NULLIF(TRIM(sb.f_class), '') IS NULL
-                  OR LOWER(TRIM(sb.f_class)) IN ('unknown', 'none', 'null', 'nan', 'n_a', 'na')
-                THEN 'yes' ELSE LOWER(TRIM(sb.f_class)) END AS fc
+           CASE WHEN NULLIF(TRIM(COALESCE(sb.f_class_override, sb.f_class)), '') IS NULL
+                  OR LOWER(TRIM(COALESCE(sb.f_class_override, sb.f_class)))
+                     IN ('unknown', 'none', 'null', 'nan', 'n_a', 'na')
+                THEN 'yes' ELSE LOWER(TRIM(COALESCE(sb.f_class_override, sb.f_class))) END AS fc
     FROM site_building sb WHERE sb.site_id = %(site)s
 ), d AS (
     SELECT b.*, cc.load_method, cc.peak_load, cc.peak_load_per_m2,
@@ -45,7 +46,8 @@ SELECT building_id, osm_id, fc, a, ST_AsGeoJSON(ST_Transform(geom, 4326)), hh,
        CASE WHEN yearly_per_household THEN hh * yearly_household_kwh ELSE yearly_area_kwh END,
        COALESCE(measured_yearly_kwh,
                 CASE WHEN yearly_per_household THEN COALESCE(dwellings, hh) * yearly_household_kwh
-                     ELSE yearly_area_kwh END)
+                     ELSE yearly_area_kwh END),
+       source, source_id, f_class_override
 FROM d ORDER BY building_id;
 """
 
@@ -53,10 +55,11 @@ FROM d ORDER BY building_id;
 def _overrides(row) -> dict | None:
     """Return the overrides object of a building row, or None when it has none."""
     peak, yearly, dwellings, excluded, loads = row[7:12]
-    if peak is None and yearly is None and dwellings is None and not excluded and not loads:
+    f_class = row[16]
+    if peak is None and yearly is None and dwellings is None and not excluded and not loads and f_class is None:
         return None
     return {"measured_peak_kw": peak, "measured_yearly_kwh": yearly, "dwellings": dwellings,
-            "extra_loads": loads, "excluded": excluded}
+            "extra_loads": loads, "excluded": excluded, "f_class": f_class}
 
 
 def list_buildings(cur, site_id: int) -> dict:
@@ -69,6 +72,9 @@ def list_buildings(cur, site_id: int) -> dict:
             "defaults": {"dwellings": row[5], "peak_kw": row[6], "yearly_kwh": row[12]},
             "yearly_kwh_used": row[13],
             "overrides": _overrides(row),
+            "source": row[14], "source_id": row[15],
+            # A 3D-only building starts with a placeholder class until someone sets one.
+            "f_class_confirmed": row[14] == "osm" or row[16] is not None,
         }
         features.append({"type": "Feature", "geometry": json.loads(row[4]), "properties": properties})
     return {"type": "FeatureCollection", "features": features}
@@ -93,19 +99,21 @@ def _validate_patch(cur, site_id: int, patches: list) -> None:
                 f"Building {p['building_id']}: extra_loads cannot be combined with measured_peak_kw, "
                 "which may already contain them"
             )
-    _validate_load_categories(cur, patches)
+    overrides = [p["overrides"] for p in patches if p["overrides"]]
+    require_categories(cur, {load["category"] for o in overrides for load in o["extra_loads"]}, "extra-load")
+    require_categories(cur, {o["f_class"] for o in overrides if o["f_class"]}, "f_class")
     _validate_excluded_unassigned(cur, site_id, patches)
 
 
-def _validate_load_categories(cur, patches: list) -> None:
-    """Reject extra-load categories that are not in consumer_categories."""
-    categories = {l["category"] for p in patches if p["overrides"] for l in p["overrides"]["extra_loads"]}
+def require_categories(cur, categories: set, what: str) -> None:
+    """Reject category names that are not definitions in consumer_categories."""
     if not categories:
         return
-    cur.execute("SELECT definition FROM consumer_categories WHERE definition = ANY(%s::text[])", (list(categories),))
+    cur.execute("SELECT definition FROM consumer_categories WHERE definition = ANY(%s::text[])",
+                (list(categories),))
     unknown = sorted(categories - {r[0] for r in cur.fetchall()})
     if unknown:
-        raise SiteValidationError(f"Unknown extra-load categories: {unknown}")
+        raise SiteValidationError(f"Unknown {what} categories: {unknown}")
 
 
 def _validate_excluded_unassigned(cur, site_id: int, patches: list) -> None:
@@ -127,13 +135,13 @@ def _validate_excluded_unassigned(cur, site_id: int, patches: list) -> None:
 def _write_overrides(cur, site_id: int, building_id: int, o: dict | None) -> None:
     """Replace one building's overrides and extra loads."""
     o = o or {"measured_peak_kw": None, "measured_yearly_kwh": None, "dwellings": None,
-              "extra_loads": [], "excluded": False}
+              "extra_loads": [], "excluded": False, "f_class": None}
     cur.execute(
         """UPDATE site_building SET measured_peak_kw = %s, measured_yearly_kwh = %s,
-               dwellings = %s, excluded = %s
+               dwellings = %s, excluded = %s, f_class_override = %s
            WHERE site_id = %s AND building_id = %s""",
         (o["measured_peak_kw"], o["measured_yearly_kwh"], o["dwellings"], o["excluded"],
-         site_id, building_id),
+         o["f_class"], site_id, building_id),
     )
     cur.execute("DELETE FROM site_building_load WHERE site_id = %s AND building_id = %s",
                 (site_id, building_id))
