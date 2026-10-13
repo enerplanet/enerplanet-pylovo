@@ -82,16 +82,22 @@ class CableInstaller:
 
         self.backend.create_component(ExtGridSpec(name="External grid", bus="MVbus 1", vm_pu=1))
 
-    def create_transformer(self, plz: int, kcid: int, bcid: int, country_code: str | None = None) -> None:
+    def create_transformer(self, plz: int, kcid: int, bcid: int, country_code: str | None = None,
+                           fixed_rating: bool = False) -> None:
         """
         Create a transformer based on the required rated power.
 
         Maps the required capacity to either a single standard transformer
-        or a parallel configuration (2x) for specific larger loads.
+        or a parallel configuration (2x) for specific larger loads. A fixed
+        (known) rating is built as one unit of exactly that size.
         """
         transformer_rated_power = self.dbc.get_transformer_rated_power_from_bcid(plz, kcid, bcid, country_code)
 
-        if transformer_rated_power in (100, 160, 250, 400, 630):
+        if fixed_rating:
+            trafo_name = f"known {str(transformer_rated_power)} kva transformer"
+            kva = transformer_rated_power
+            parallel = 1
+        elif transformer_rated_power in (100, 160, 250, 400, 630):
             trafo_name = f"single {str(transformer_rated_power)} kva transformer"
             kva = transformer_rated_power
             parallel = 1
@@ -110,7 +116,8 @@ class CableInstaller:
             bus1="MVbus 1",
             bus2="LVbus 1",
             kva=kva,
-            parallel=parallel
+            parallel=parallel,
+            fixed_rating=fixed_rating,
         )
 
         self.backend.create_component(trafo_spec)

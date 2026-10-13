@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException
 from models import PowerFlowRequest, HostingCapacityRequest
 from src.database.database_client import DatabaseClient
 from src.ev_hosting import calculate_hosting_capacity
+from utils.site_scope import require_site_grids
 
 router = APIRouter(tags=["power_flow"])
 
@@ -140,6 +141,10 @@ async def run_power_flow(payload: PowerFlowRequest):
 
     Builds the pandapower network dynamically from stored grid data (lines, transformers, loads).
     """
+    building_osm_ids = payload.building_osm_ids
+    if payload.site_id is not None:
+        building_osm_ids = require_site_grids(payload.site_id, payload.revision,
+                                              [payload.grid_result_id], building_osm_ids)
     dbc = None
     try:
         import pandapower as pp
@@ -171,7 +176,7 @@ async def run_power_flow(payload: PowerFlowRequest):
             trafo_lon, trafo_lat = trafo_row[2], trafo_row[3]
 
             # Get buildings/loads for this grid
-            building_filter = payload.building_osm_ids
+            building_filter = building_osm_ids
             assignment_filter, assignment_params = _build_scope_filter(
                 user_id=payload.user_id,
                 model_id=payload.model_id,

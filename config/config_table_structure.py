@@ -602,7 +602,137 @@ CREATE_QUERIES = {
     CREATE INDEX IF NOT EXISTS idx_lines_result_with_grid_geom ON lines_result_with_grid USING gist (geom);
     CREATE UNIQUE INDEX IF NOT EXISTS idx_lines_result_with_grid_pk ON lines_result_with_grid (id)
     """,
+    # Site mode: a user-defined polygon with its own copy of the grid inputs.
+    # A site generates as pseudo-postcode 'S<site_id>' (see SITE_PLZ_PREFIX);
+    # the shared res, oth and transformers tables are never written by a site.
+    "site": """
+    CREATE TABLE IF NOT EXISTS site (
+        site_id SERIAL PRIMARY KEY,
+        user_id varchar(255) NOT NULL,
+        name varchar(200) NOT NULL,
+        country_code varchar(10) NOT NULL REFERENCES country (country_code),
+        geom geometry(MultiPolygon, 3035) NOT NULL,
+        revision integer NOT NULL DEFAULT 1,
+        generated_revision integer,
+        last_building_id integer NOT NULL DEFAULT 0,
+        created_at timestamptz NOT NULL DEFAULT NOW(),
+        updated_at timestamptz NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_site_user ON site (user_id);
+    """,
+    "site_building": """
+    CREATE TABLE IF NOT EXISTS site_building (
+        site_id integer NOT NULL REFERENCES site (site_id) ON DELETE CASCADE,
+        building_id integer NOT NULL,
+        osm_id varchar,
+        kind varchar(3) NOT NULL CHECK (kind IN ('res', 'oth')),
+        area double precision,
+        use varchar(80),
+        building_t varchar(80),
+        occupants double precision,
+        floors integer,
+        constructi varchar(80),
+        f_class varchar(80) NOT NULL DEFAULT 'yes',
+        f_classes text,
+        geom geometry(MultiPolygon, 3035) NOT NULL,
+        height_max double precision,
+        height_ground double precision,
+        height_median double precision,
+        floors_3dbag integer,
+        bag_id varchar,
+        energy_label varchar(5),
+        energy_index double precision,
+        cbs_population double precision,
+        cbs_households double precision,
+        cbs_avg_household_size double precision,
+        measured_peak_kw double precision CHECK (measured_peak_kw > 0),
+        measured_yearly_kwh double precision CHECK (measured_yearly_kwh >= 0),
+        dwellings integer CHECK (dwellings > 0),
+        excluded boolean NOT NULL DEFAULT FALSE,
+        f_class_override varchar(80),
+        source varchar(12) NOT NULL DEFAULT 'osm' CHECK (source IN ('osm', 'city2tabula')),
+        source_id varchar,
+        PRIMARY KEY (site_id, building_id),
+        UNIQUE (site_id, source, source_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_site_building_geom ON site_building USING GIST (geom);
+    """,
+    "site_building_load": """
+    CREATE TABLE IF NOT EXISTS site_building_load (
+        site_id integer NOT NULL,
+        building_id integer NOT NULL,
+        category varchar(80) NOT NULL REFERENCES consumer_categories (definition),
+        kw double precision NOT NULL CHECK (kw > 0),
+        PRIMARY KEY (site_id, building_id, category),
+        FOREIGN KEY (site_id, building_id)
+            REFERENCES site_building (site_id, building_id) ON DELETE CASCADE
+    );
+    """,
+    "site_transformer": """
+    CREATE TABLE IF NOT EXISTS site_transformer (
+        transformer_id SERIAL PRIMARY KEY,
+        site_id integer NOT NULL REFERENCES site (site_id) ON DELETE CASCADE,
+        osm_id varchar,
+        source varchar(4) NOT NULL CHECK (source IN ('osm', 'user')),
+        rated_kva integer CHECK (rated_kva > 0),
+        geom geometry(Point, 3035) NOT NULL,
+        UNIQUE (site_id, transformer_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_site_transformer_site ON site_transformer (site_id);
+    """,
+    # The primary key allows each building at most one fixed transformer.
+    "site_transformer_assignment": """
+    CREATE TABLE IF NOT EXISTS site_transformer_assignment (
+        site_id integer NOT NULL,
+        building_id integer NOT NULL,
+        transformer_id integer NOT NULL,
+        PRIMARY KEY (site_id, building_id),
+        FOREIGN KEY (site_id, building_id)
+            REFERENCES site_building (site_id, building_id) ON DELETE CASCADE,
+        FOREIGN KEY (site_id, transformer_id)
+            REFERENCES site_transformer (site_id, transformer_id) ON DELETE CASCADE
+    );
+    """,
+    "site_job": """
+    CREATE TABLE IF NOT EXISTS site_job (
+        job_id SERIAL PRIMARY KEY,
+        site_id integer NOT NULL REFERENCES site (site_id) ON DELETE CASCADE,
+        revision integer NOT NULL,
+        status varchar(10) NOT NULL DEFAULT 'queued'
+            CHECK (status IN ('queued', 'running', 'succeeded', 'failed')),
+        stage varchar(100),
+        error text,
+        overloaded_transformer_ids integer[],
+        unroutable_building_ids integer[],
+        created_at timestamptz NOT NULL DEFAULT NOW(),
+        started_at timestamptz,
+        finished_at timestamptz,
+        heartbeat_at timestamptz
+    );
+    CREATE INDEX IF NOT EXISTS idx_site_job_site ON site_job (site_id, job_id DESC);
+    """,
+    # Recorded at generation time, so a later rating edit does not relabel an old grid.
+    "site_grid_transformer": """
+    CREATE TABLE IF NOT EXISTS site_grid_transformer (
+        grid_result_id integer PRIMARY KEY REFERENCES grid_result (grid_result_id) ON DELETE CASCADE,
+        site_id integer NOT NULL REFERENCES site (site_id) ON DELETE CASCADE,
+        site_transformer_id integer,
+        origin varchar(5) NOT NULL CHECK (origin IN ('known', 'osm', 'user', 'new')),
+        loading_pct double precision
+    );
+    """,
 }
+
+SITE_TABLES = (
+    "site",
+    "site_building",
+    "site_building_load",
+    "site_transformer",
+    "site_transformer_assignment",
+    "site_job",
+    "site_grid_transformer",
+)
+SITE_PLZ_PREFIX = "S"
 
 TEMP_CREATE_QUERIES = {
     "buildings_tem": """CREATE TABLE IF NOT EXISTS buildings_tem

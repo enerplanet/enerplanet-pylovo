@@ -13,9 +13,11 @@ from fastapi import APIRouter, HTTPException
 from models import GridRequest, GridStatisticsRequest
 from src.ai_estimation import estimate_building_energy
 from src.database.database_client import DatabaseClient
-from src.config_loader import CABLE_COST_DICT, VN, V_BAND_LOW, V_BAND_HIGH
+from src.config_loader import CABLE_COST_DICT, CONSUMER_CATEGORIES, VN, V_BAND_LOW, V_BAND_HIGH
+from config.config_table_structure import CREATE_QUERIES, SITE_TABLES
 from services.mv_lines import generate_synthetic_mv_lines
 from utils.helpers import infer_input_srid
+from utils.site_scope import require_site_grids
 
 router = APIRouter(tags=["grid"])
 
@@ -236,7 +238,9 @@ def ensure_runtime_schema(dbc: DatabaseClient) -> None:
                         EXCEPT
                         SELECT table_name, column_name FROM existing
                     )
-                    AND to_regclass('building_transformer_assignments') IS NOT NULL;
+                    AND to_regclass('building_transformer_assignments') IS NOT NULL
+                    AND to_regclass('site_grid_transformer') IS NOT NULL
+                    AND EXISTS (SELECT 1 FROM consumer_categories WHERE definition = 'heat_pump');
                 """
             )
             if dbc.cur.fetchone()[0]:
@@ -283,6 +287,11 @@ def ensure_runtime_schema(dbc: DatabaseClient) -> None:
             dbc.cur.execute("ALTER TABLE IF EXISTS oth ADD COLUMN IF NOT EXISTS energy_index DOUBLE PRECISION;")
             dbc.cur.execute("ALTER TABLE IF EXISTS equipment_data ADD COLUMN IF NOT EXISTS equipment_only_cost_eur INTEGER;")
             dbc.cur.execute("ALTER TABLE IF EXISTS equipment_data ADD COLUMN IF NOT EXISTS installed_cost_eur INTEGER;")
+            for table_name in SITE_TABLES:
+                dbc.cur.execute(CREATE_QUERIES[table_name])
+            # Site extra loads reference categories that exist only in the config
+            # until a generation run upserts them.
+            dbc.insert_consumer_categories_from_config(consumer_categories=CONSUMER_CATEGORIES)
             dbc.conn.commit()
             _RUNTIME_SCHEMA_READY = True
             print("[Schema] Runtime schema checks completed")
@@ -378,12 +387,26 @@ def _fetch_state_boundary_bbox_for_centroid(dbc: DatabaseClient, lon: float, lat
     }
 
 
+# Site grids are stored under pseudo-postcodes 'S<site_id>' with building
+# keys 'site:<site_id>:...' (src/site_mode); postcode-mode queries exclude them.
+SITE_GRID_PLZ_PATTERN = "^S[0-9]+$"
+
+
 @router.post("/generate-grid")
 async def generate_grid_phase1(payload: GridRequest):
     """
     Use the same algorithm and SQL pattern as your verified
     GeoPandas script so that Pylovo returns exactly the same
     buildings for a given polygon.
+    """
+    return build_grid_response(payload)
+
+
+def build_grid_response(payload: GridRequest, site_plz: str | None = None) -> dict:
+    """Build the /generate-grid response for a polygon, or for one site's grid.
+
+    With site_plz set, only that site's stored grid is returned, and custom
+    buildings and model overlays are not read.
     """
     dbc = None
     try:
@@ -392,6 +415,13 @@ async def generate_grid_phase1(payload: GridRequest):
         dbc = DatabaseClient()
         input_srid = infer_input_srid(payload.geom)
         print(f"[Grid Query] Detected input SRID: {input_srid}")
+
+        if site_plz is None:
+            building_scope = "ST_Intersects(br.geom, poly.g) AND br.osm_id NOT LIKE 'site:%%'"
+            scope_params = []
+        else:
+            building_scope = "gr.plz = %s"
+            scope_params = [site_plz]
 
         # 1. Buildings - use building_transformer_assignments for model-specific transformer assignments
         # The assignments table overrides the original grid_result_id for specific models/drafts
@@ -404,7 +434,7 @@ async def generate_grid_phase1(payload: GridRequest):
         if assignment_filter:
             # Query with assignment override - uses COALESCE to prefer assignment grid_result_id
             # Params order: geom, assignment_params, version_id
-            buildings_params = [json.dumps(payload.geom)] + assignment_params + [VERSION_ID]
+            buildings_params = [json.dumps(payload.geom)] + assignment_params + [VERSION_ID] + scope_params
             buildings = gpd.GeoDataFrame.from_postgis(
                 f"""
                 WITH poly AS (
@@ -489,7 +519,7 @@ async def generate_grid_phase1(payload: GridRequest):
                     ON br.osm_id = bta.building_osm_id AND {assignment_filter}
                 WHERE br.version_id = %s
                   AND br.vertice_id IS NOT NULL
-                  AND ST_Intersects(br.geom, poly.g);
+                  AND {building_scope};
                 """,
                 con=dbc.conn,
                 params=buildings_params,
@@ -497,7 +527,7 @@ async def generate_grid_phase1(payload: GridRequest):
             )
         else:
             # No model context - just get original buildings without any assignments
-            buildings_params = [json.dumps(payload.geom), VERSION_ID]
+            buildings_params = [json.dumps(payload.geom), VERSION_ID] + scope_params
             buildings = gpd.GeoDataFrame.from_postgis(
                 f"""
                 WITH poly AS (
@@ -580,7 +610,7 @@ async def generate_grid_phase1(payload: GridRequest):
                     ON defcc.definition = '_default'
                 WHERE br.version_id = %s
                   AND br.vertice_id IS NOT NULL
-                  AND ST_Intersects(br.geom, poly.g);
+                  AND {building_scope};
                 """,
                 con=dbc.conn,
                 params=buildings_params,
@@ -591,7 +621,7 @@ async def generate_grid_phase1(payload: GridRequest):
         # 1b. Custom Buildings
         try:
             dbc.cur.execute("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'custom_buildings');")
-            if dbc.cur.fetchone()[0]:
+            if dbc.cur.fetchone()[0] and site_plz is None:
                 user_id_param = payload.user_id or ''
                 include_public = payload.include_public_buildings if payload.include_public_buildings is not None else True
                 include_private = payload.include_private_buildings if payload.include_private_buildings is not None else True
@@ -652,6 +682,7 @@ async def generate_grid_phase1(payload: GridRequest):
                                 JOIN grid_result gr ON gr.grid_result_id = tp.grid_result_id
                                 WHERE tp.version_id = '1'
                                   AND COALESCE(gr.plz, '') <> 'USER'
+                                  AND gr.plz !~ '{SITE_GRID_PLZ_PATTERN}'
                                 ORDER BY tp.geom <-> ST_Transform(c.geom, 3035)
                                 LIMIT 1),
                                -1
@@ -707,7 +738,9 @@ async def generate_grid_phase1(payload: GridRequest):
             }
 
         stages.mark("custom_buildings")
-        buildings = _apply_ai_estimates_to_buildings(buildings)
+        # Site grids report the demand that sized them, not the display estimate.
+        if site_plz is None:
+            buildings = _apply_ai_estimates_to_buildings(buildings)
         stages.mark("ai_estimates")
 
         buildings["group_id"] = buildings["grid_result_id"]
@@ -1238,6 +1271,8 @@ async def generate_grid_phase1(payload: GridRequest):
 @router.post("/grid-statistics")
 async def get_grid_statistics(payload: GridStatisticsRequest):
     """Get detailed statistics for specified grid result IDs"""
+    if payload.site_id is not None:
+        require_site_grids(payload.site_id, payload.revision, payload.grid_result_ids)
     dbc = None
     try:
         dbc = DatabaseClient()
