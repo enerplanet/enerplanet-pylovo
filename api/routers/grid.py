@@ -13,8 +13,9 @@ from fastapi import APIRouter, HTTPException
 from models import GridRequest, GridStatisticsRequest
 from src.ai_estimation import estimate_building_energy
 from src.database.database_client import DatabaseClient
-from src.config_loader import CABLE_COST_DICT, CONSUMER_CATEGORIES, VN, V_BAND_LOW, V_BAND_HIGH
+from src.config_loader import CONSUMER_CATEGORIES
 from config.config_table_structure import CREATE_QUERIES, SITE_TABLES
+from services import grid_statistics
 from services.mv_lines import generate_synthetic_mv_lines
 from utils.helpers import infer_input_srid
 from utils.site_scope import require_site_grids
@@ -1270,191 +1271,28 @@ def build_grid_response(payload: GridRequest, site_plz: str | None = None) -> di
 
 @router.post("/grid-statistics")
 async def get_grid_statistics(payload: GridStatisticsRequest):
-    """Get detailed statistics for specified grid result IDs"""
+    """Get statistics for grid result IDs, or for the listed buildings' part of them."""
+    building_osm_ids = payload.building_osm_ids
     if payload.site_id is not None:
-        require_site_grids(payload.site_id, payload.revision, payload.grid_result_ids)
+        building_osm_ids = require_site_grids(payload.site_id, payload.revision,
+                                              payload.grid_result_ids, building_osm_ids)
+    grid_ids = payload.grid_result_ids
+    if not grid_ids:
+        return {"status": "success", "statistics": {}}
     dbc = None
     try:
         dbc = DatabaseClient()
-        grid_ids = payload.grid_result_ids
-
-        if not grid_ids:
-            return {"status": "success", "statistics": {}}
-
-        # Building statistics
-        buildings_stats_query = """
-            SELECT
-                COUNT(*) as building_count,
-                SUM(area) as total_area_m2,
-                AVG(area) as avg_area_m2,
-                SUM(peak_load_in_kw) as total_peak_load_kw,
-                AVG(peak_load_in_kw) as avg_peak_load_kw,
-                COUNT(DISTINCT type) as building_type_count
-            FROM buildings_result
-            WHERE grid_result_id = ANY(%s);
-        """
-        dbc.cur.execute(buildings_stats_query, (grid_ids,))
-        bldg_row = dbc.cur.fetchone()
-
-        # Building type breakdown
-        building_types_query = """
-            SELECT type, COUNT(*) as count, SUM(peak_load_in_kw) as total_peak_kw
-            FROM buildings_result
-            WHERE grid_result_id = ANY(%s)
-            GROUP BY type
-            ORDER BY count DESC;
-        """
-        dbc.cur.execute(building_types_query, (grid_ids,))
-        type_rows = dbc.cur.fetchall()
-
-        # Transformer statistics
-        transformer_stats_query = """
-            SELECT
-                COUNT(*) as transformer_count,
-                SUM(gr.transformer_rated_power) as total_capacity_kva,
-                AVG(gr.transformer_rated_power) as avg_capacity_kva,
-                MIN(gr.transformer_rated_power) as min_capacity_kva,
-                MAX(gr.transformer_rated_power) as max_capacity_kva
-            FROM transformer_positions tp
-            JOIN grid_result gr ON tp.grid_result_id = gr.grid_result_id
-            WHERE tp.grid_result_id = ANY(%s);
-        """
-        dbc.cur.execute(transformer_stats_query, (grid_ids,))
-        trafo_row = dbc.cur.fetchone()
-
-        # Get transformer cost lookup
-        trafo_cost_query = """
-            SELECT
-                s_max_kva,
-                COALESCE(installed_cost_eur, cost_eur, equipment_only_cost_eur) AS effective_cost_eur
-            FROM equipment_data
-            WHERE typ = 'Transformer' AND s_max_kva IS NOT NULL;
-        """
-        dbc.cur.execute(trafo_cost_query)
-        trafo_cost_lookup = {int(row[0]): float(row[1]) for row in dbc.cur.fetchall()}
-
-        # Get individual transformer sizes
-        trafo_sizes_query = """
-            SELECT gr.transformer_rated_power
-            FROM transformer_positions tp
-            JOIN grid_result gr ON tp.grid_result_id = gr.grid_result_id
-            WHERE tp.grid_result_id = ANY(%s);
-        """
-        dbc.cur.execute(trafo_sizes_query, (grid_ids,))
-        trafo_sizes = [row[0] for row in dbc.cur.fetchall()]
-
-        # Line/Cable statistics
-        lines_stats_query = """
-            SELECT
-                COUNT(*) as line_count,
-                SUM(length_km) as total_length_km,
-                AVG(length_km) as avg_length_km,
-                COUNT(DISTINCT std_type) as cable_type_count
-            FROM lines_result
-            WHERE grid_result_id = ANY(%s);
-        """
-        dbc.cur.execute(lines_stats_query, (grid_ids,))
-        lines_row = dbc.cur.fetchone()
-
-        # Cable type breakdown
-        cable_types_query = """
-            SELECT std_type, COUNT(*) as count, SUM(length_km) as total_length_km
-            FROM lines_result
-            WHERE grid_result_id = ANY(%s)
-            GROUP BY std_type
-            ORDER BY total_length_km DESC;
-        """
-        dbc.cur.execute(cable_types_query, (grid_ids,))
-        cable_rows = dbc.cur.fetchall()
-
-        # Calculate costs
-        total_cable_cost = 0
-        cable_breakdown = []
-        for row in cable_rows:
-            cable_type = row[0]
-            length_km = float(row[2] or 0)
-            cost_per_m = CABLE_COST_DICT.get(cable_type, 20)
-            cost = length_km * 1000 * cost_per_m
-            total_cable_cost += cost
-            cable_breakdown.append({
-                "type": cable_type,
-                "count": row[1],
-                "length_km": round(length_km, 3),
-                "cost_eur": round(cost, 2)
-            })
-
-        # Calculate transformer cost
-        transformer_cost = 0
-        transformer_cost_breakdown = []
-        for size in trafo_sizes:
-            size_int = int(size) if size else 0
-            if size_int in trafo_cost_lookup:
-                cost = trafo_cost_lookup[size_int]
-            else:
-                available_sizes = sorted(trafo_cost_lookup.keys())
-                nearest_size = min(available_sizes, key=lambda x: abs(x - size_int)) if available_sizes else None
-                cost = trafo_cost_lookup.get(nearest_size, 0) if nearest_size else 0
-            transformer_cost += cost
-            transformer_cost_breakdown.append({"size_kva": size_int, "cost_eur": cost})
-
-        # Calculate simultaneity factor adjusted load
-        total_peak_load = bldg_row[3] if bldg_row[3] else 0
-        building_count = bldg_row[0] if bldg_row[0] else 0
-        if building_count > 0:
-            sim_factor = 0.07 + (1 - 0.07) * (building_count ** (-0.75))
-            simultaneous_load_kw = float(total_peak_load) * sim_factor
-        else:
-            simultaneous_load_kw = 0
-
-        statistics = {
-            "buildings": {
-                "count": bldg_row[0] or 0,
-                "total_area_m2": round(bldg_row[1] or 0, 2),
-                "avg_area_m2": round(bldg_row[2] or 0, 2),
-                "total_peak_load_kw": round(bldg_row[3] or 0, 2),
-                "avg_peak_load_kw": round(bldg_row[4] or 0, 2),
-                "simultaneous_load_kw": round(simultaneous_load_kw, 2),
-                "building_types": [
-                    {"type": r[0], "count": r[1], "total_peak_kw": round(r[2] or 0, 2)}
-                    for r in type_rows
-                ]
-            },
-            "transformers": {
-                "count": trafo_row[0] or 0,
-                "total_capacity_kva": round(trafo_row[1] or 0, 2),
-                "avg_capacity_kva": round(trafo_row[2] or 0, 2),
-                "min_capacity_kva": trafo_row[3],
-                "max_capacity_kva": trafo_row[4],
-                "utilization_percent": round((simultaneous_load_kw / float(trafo_row[1] or 1)) * 100, 1) if trafo_row[1] else 0
-            },
-            "cables": {
-                "count": lines_row[0] or 0,
-                "total_length_km": round(lines_row[1] or 0, 3),
-                "avg_length_km": round(lines_row[2] or 0, 4),
-                "cable_types": cable_breakdown
-            },
-            "costs": {
-                "cable_cost_eur": round(total_cable_cost, 2),
-                "transformer_cost_eur": round(transformer_cost, 2),
-                "transformer_cost_breakdown": transformer_cost_breakdown,
-                "total_estimated_cost_eur": round(total_cable_cost + transformer_cost, 2)
-            },
-            "voltage": {
-                "nominal_voltage_v": VN,
-                "voltage_band_low": V_BAND_LOW,
-                "voltage_band_high": V_BAND_HIGH
-            }
-        }
-
-        return {
-            "status": "success",
-            "grid_result_ids": grid_ids,
-            "statistics": statistics
-        }
-
+        rows = grid_statistics.fetch_grid_rows(dbc.cur, grid_ids)
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         if dbc is not None:
             dbc.close()
+
+    if building_osm_ids is None:
+        stats = grid_statistics.statistics(rows["buildings"], rows["lines"], rows["transformers"],
+                                           rows["transformer_costs"])
+    else:
+        stats = grid_statistics.selection_statistics(rows, building_osm_ids)
+    return {"status": "success", "grid_result_ids": grid_ids, "statistics": stats}
