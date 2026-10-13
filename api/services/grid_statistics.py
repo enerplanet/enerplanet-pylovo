@@ -6,7 +6,8 @@ from src.config_loader import CABLE_COST_DICT, VN, V_BAND_LOW, V_BAND_HIGH
 DEFAULT_CABLE_COST_PER_M = 20
 
 BUILDINGS_SQL = """
-    SELECT osm_id, grid_result_id, area, type, peak_load_in_kw, vertice_id, connection_point
+    SELECT osm_id, grid_result_id, area, type, peak_load_in_kw, vertice_id, connection_point,
+           households_per_building
     FROM buildings_result
     WHERE grid_result_id = ANY(%s);
 """
@@ -41,7 +42,8 @@ def fetch_grid_rows(cur, grid_ids: list) -> dict:
     """Read the buildings, lines and transformers of grid_ids plus the transformer cost table."""
     rows = {
         "buildings": _fetch(cur, BUILDINGS_SQL, grid_ids, (
-            "osm_id", "grid_result_id", "area", "type", "peak_load_in_kw", "vertice_id", "connection_point")),
+            "osm_id", "grid_result_id", "area", "type", "peak_load_in_kw", "vertice_id", "connection_point",
+            "households_per_building")),
         "lines": _fetch(cur, LINES_SQL, grid_ids, (
             "lines_result_id", "grid_result_id", "std_type", "from_bus", "to_bus", "length_km")),
         "transformers": _fetch(cur, TRANSFORMERS_SQL, grid_ids, ("grid_result_id", "rated_power", "ont_vertice_id")),
@@ -150,12 +152,43 @@ def _transformer_statistics(transformers: list[dict], simultaneous_load_kw: floa
     }
 
 
-def statistics(buildings: list[dict], lines: list[dict], transformers: list[dict], costs: dict) -> dict:
-    """Build the /grid-statistics statistics block from the given rows."""
+def _households(building: dict) -> int:
+    """Connections a building counts for in the transformer cost share; one if it has no households."""
+    return building["households_per_building"] or 1
+
+
+def household_shares(selected: list[dict], all_buildings: list[dict]) -> dict:
+    """Per grid_result_id, the selected buildings' households over all households on that transformer."""
+    totals, picked = defaultdict(int), defaultdict(int)
+    for b in all_buildings:
+        totals[b["grid_result_id"]] += _households(b)
+    for b in selected:
+        picked[b["grid_result_id"]] += _households(b)
+    return {grid_id: picked[grid_id] / totals[grid_id] if totals[grid_id] else 0 for grid_id in picked}
+
+
+def _transformer_costs(transformers: list[dict], costs: dict, shares: dict | None) -> list[dict]:
+    """Cost of each transformer, or with shares its household share of that cost."""
+    breakdown = []
+    for t in transformers:
+        entry = {"size_kva": int(t["rated_power"]) if t["rated_power"] else 0,
+                 "cost_eur": _transformer_cost(t["rated_power"], costs)}
+        if shares is not None:
+            entry["household_share"] = round(shares.get(t["grid_result_id"], 0), 4)
+            entry["cost_eur"] = round(entry["cost_eur"] * shares.get(t["grid_result_id"], 0), 2)
+        breakdown.append(entry)
+    return breakdown
+
+
+def statistics(buildings: list[dict], lines: list[dict], transformers: list[dict], costs: dict,
+               shares: dict | None = None) -> dict:
+    """Build the /grid-statistics statistics block from the given rows.
+
+    shares, keyed by grid_result_id, charges each transformer's cost at that fraction.
+    """
     building_stats = _building_statistics(buildings)
     cable_stats, cable_cost = _cable_statistics(lines)
-    trafo_costs = [{"size_kva": int(t["rated_power"]) if t["rated_power"] else 0,
-                    "cost_eur": _transformer_cost(t["rated_power"], costs)} for t in transformers]
+    trafo_costs = _transformer_costs(transformers, costs, shares)
     trafo_cost = sum(t["cost_eur"] for t in trafo_costs)
     return {
         "buildings": building_stats,
@@ -171,8 +204,11 @@ def statistics(buildings: list[dict], lines: list[dict], transformers: list[dict
     }
 
 
-def selection_statistics(rows: dict, building_osm_ids: list) -> dict:
+def selection_statistics(rows: dict, building_osm_ids: list, share_transformer_cost: bool = True) -> dict:
     """Statistics for the listed buildings, their transformers and their cable paths, plus whole_grid.
+
+    With share_transformer_cost, each serving transformer's cost is charged at the
+    listed buildings' household share; otherwise at full cost.
 
     whole_grid carries the unscoped buildings.count, cables.count,
     cables.total_length_km and transformers.utilization_percent.
@@ -182,7 +218,8 @@ def selection_statistics(rows: dict, building_osm_ids: list) -> dict:
     serving = {b["grid_result_id"] for b in buildings}
     transformers = [t for t in rows["transformers"] if t["grid_result_id"] in serving]
     lines = cable_paths(buildings, rows["lines"], transformers)
-    scoped = statistics(buildings, lines, transformers, rows["transformer_costs"])
+    shares = household_shares(buildings, rows["buildings"]) if share_transformer_cost else None
+    scoped = statistics(buildings, lines, transformers, rows["transformer_costs"], shares)
     whole = statistics(rows["buildings"], rows["lines"], rows["transformers"], rows["transformer_costs"])
     scoped["whole_grid"] = {
         "buildings": {"count": whole["buildings"]["count"]},

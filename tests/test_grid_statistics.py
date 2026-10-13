@@ -15,9 +15,10 @@ def _line(line_id: int, from_bus: int, to_bus: int, km: float, grid: int = 1) ->
             "from_bus": from_bus, "to_bus": to_bus, "length_km": km}
 
 
-def _building(osm_id: str, vertice: int, grid: int = 1, peak: float = 10.0) -> dict:
+def _building(osm_id: str, vertice: int, grid: int = 1, peak: float = 10.0, households: int = 1) -> dict:
     return {"osm_id": osm_id, "grid_result_id": grid, "area": 100.0, "type": "residential",
-            "peak_load_in_kw": peak, "vertice_id": vertice, "connection_point": None}
+            "peak_load_in_kw": peak, "vertice_id": vertice, "connection_point": None,
+            "households_per_building": households}
 
 
 # Transformer bus 1 feeds street nodes 2 -> 3 -> 4; houses 20, 30, 40 hang off 2, 3, 4,
@@ -61,6 +62,30 @@ class SelectionStatisticsTest(unittest.TestCase):
         stats = selection_statistics(rows, ["missing"])
         self.assertEqual((stats["buildings"]["count"], stats["cables"]["count"], stats["transformers"]["count"]),
                          (0, 0, 0))
+
+
+class TransformerCostShareTest(unittest.TestCase):
+    def _costs(self, buildings: list, selected: list) -> dict:
+        rows = {"buildings": buildings, "lines": LINES, "transformers": TRANSFORMERS,
+                "transformer_costs": {400: 10000.0}}
+        return selection_statistics(rows, selected)["costs"]
+
+    def test_selection_pays_its_household_share(self):
+        buildings = [_building("a", 20, households=2), _building("b", 30), _building("c", 40)]
+        costs = self._costs(buildings, ["a"])
+        self.assertEqual(costs["transformer_cost_eur"], 5000.0)
+        self.assertEqual(costs["transformer_cost_breakdown"],
+                         [{"size_kva": 400, "cost_eur": 5000.0, "household_share": 0.5}])
+
+    def test_building_without_households_counts_as_one_connection(self):
+        buildings = [_building("a", 20, households=0), _building("b", 30), _building("c", 40)]
+        self.assertAlmostEqual(self._costs(buildings, ["a"])["transformer_cost_eur"], 3333.33)
+
+    def test_unshared_cost_is_the_full_transformer_cost(self):
+        rows = {"buildings": BUILDINGS, "lines": LINES, "transformers": TRANSFORMERS,
+                "transformer_costs": {400: 10000.0}}
+        costs = selection_statistics(rows, ["a"], share_transformer_cost=False)["costs"]
+        self.assertEqual(costs["transformer_cost_breakdown"], [{"size_kva": 400, "cost_eur": 10000.0}])
 
 
 if __name__ == "__main__":

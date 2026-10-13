@@ -1294,5 +1294,7 @@ async def get_grid_statistics(payload: GridStatisticsRequest):
         stats = grid_statistics.statistics(rows["buildings"], rows["lines"], rows["transformers"],
                                            rows["transformer_costs"])
     else:
-        stats = grid_statistics.selection_statistics(rows, building_osm_ids)
+        # A site's stations serve only the site's buildings, so they carry the full cost.
+        stats = grid_statistics.selection_statistics(rows, building_osm_ids,
+                                                     share_transformer_cost=payload.site_id is None)
     return {"status": "success", "grid_result_ids": grid_ids, "statistics": stats}
