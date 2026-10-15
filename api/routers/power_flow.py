@@ -146,79 +146,79 @@ async def run_power_flow(payload: PowerFlowRequest):
         from collections import Counter
         from pandapower.topology import unsupplied_buses
 
-        dbc = DatabaseClient()
-        grid_id = payload.grid_result_id
-        load_scaling = payload.load_scaling if payload.load_scaling is not None else 1.0
+        with DatabaseClient() as dbc:
+            grid_id = payload.grid_result_id
+            load_scaling = payload.load_scaling if payload.load_scaling is not None else 1.0
 
-        # Get transformer info for this grid
-        trafo_query = """
-            SELECT gr.transformer_rated_power,
-                   gr.ont_vertice_id,
-                   ST_X(ST_Transform(tp.geom, 4326)) as lon,
-                   ST_Y(ST_Transform(tp.geom, 4326)) as lat
-            FROM grid_result gr
-            JOIN transformer_positions tp ON tp.grid_result_id = gr.grid_result_id
-            WHERE gr.grid_result_id = %s;
-        """
-        dbc.cur.execute(trafo_query, (grid_id,))
-        trafo_row = dbc.cur.fetchone()
-
-        if not trafo_row:
-            raise HTTPException(status_code=404, detail=f"Grid {grid_id} not found")
-
-        trafo_kva = trafo_row[0] or 400
-        ont_vertice_id = _to_int_or_none(trafo_row[1])
-        trafo_lon, trafo_lat = trafo_row[2], trafo_row[3]
-
-        # Get buildings/loads for this grid
-        building_filter = payload.building_osm_ids
-        assignment_filter, assignment_params = _build_scope_filter(
-            user_id=payload.user_id,
-            model_id=payload.model_id,
-            draft_id=payload.draft_id,
-            alias="bta",
-        )
-
-        if assignment_filter:
-            loads_where = f"""
-                (br.grid_result_id = %s
-                 OR br.osm_id IN (
-                     SELECT bta.building_osm_id FROM building_transformer_assignments bta
-                     WHERE bta.grid_result_id = %s
-                       AND {assignment_filter}
-                 ))
+            # Get transformer info for this grid
+            trafo_query = """
+                SELECT gr.transformer_rated_power,
+                       gr.ont_vertice_id,
+                       ST_X(ST_Transform(tp.geom, 4326)) as lon,
+                       ST_Y(ST_Transform(tp.geom, 4326)) as lat
+                FROM grid_result gr
+                JOIN transformer_positions tp ON tp.grid_result_id = gr.grid_result_id
+                WHERE gr.grid_result_id = %s;
             """
-            loads_params = [grid_id, grid_id] + assignment_params
-        else:
-            loads_where = "br.grid_result_id = %s"
-            loads_params = [grid_id]
+            dbc.cur.execute(trafo_query, (grid_id,))
+            trafo_row = dbc.cur.fetchone()
 
-        loads_query = f"""
-            SELECT br.osm_id, br.type, br.peak_load_in_kw, br.area,
-                   br.vertice_id, br.connection_point,
-                   ST_X(ST_Transform(ST_Centroid(br.geom), 4326)) as lon,
-                   ST_Y(ST_Transform(ST_Centroid(br.geom), 4326)) as lat
-            FROM buildings_result br
-            WHERE {loads_where}
-        """
-        if building_filter and len(building_filter) > 0:
-            loads_query += " AND br.osm_id = ANY(%s)"
-            loads_params.append(building_filter)
+            if not trafo_row:
+                raise HTTPException(status_code=404, detail=f"Grid {grid_id} not found")
 
-        dbc.cur.execute(loads_query, loads_params)
-        loads_rows = dbc.cur.fetchall()
+            trafo_kva = trafo_row[0] or 400
+            ont_vertice_id = _to_int_or_none(trafo_row[1])
+            trafo_lon, trafo_lat = trafo_row[2], trafo_row[3]
 
-        print(f"[Power Flow] Grid {grid_id}: {len(loads_rows)} buildings loaded" +
-              (f" (filtered from {len(building_filter)} requested)" if building_filter else ""))
+            # Get buildings/loads for this grid
+            building_filter = payload.building_osm_ids
+            assignment_filter, assignment_params = _build_scope_filter(
+                user_id=payload.user_id,
+                model_id=payload.model_id,
+                draft_id=payload.draft_id,
+                alias="bta",
+            )
 
-        # Get all lines for this grid
-        lines_query = """
-            SELECT lines_result_id, line_name, std_type, from_bus, to_bus, length_km
-            FROM lines_result
-            WHERE grid_result_id = %s;
-        """
-        dbc.cur.execute(lines_query, (grid_id,))
-        lines_rows = dbc.cur.fetchall()
+            if assignment_filter:
+                loads_where = f"""
+                    (br.grid_result_id = %s
+                     OR br.osm_id IN (
+                         SELECT bta.building_osm_id FROM building_transformer_assignments bta
+                         WHERE bta.grid_result_id = %s
+                           AND {assignment_filter}
+                     ))
+                """
+                loads_params = [grid_id, grid_id] + assignment_params
+            else:
+                loads_where = "br.grid_result_id = %s"
+                loads_params = [grid_id]
+
+            loads_query = f"""
+                SELECT br.osm_id, br.type, br.peak_load_in_kw, br.area,
+                       br.vertice_id, br.connection_point,
+                       ST_X(ST_Transform(ST_Centroid(br.geom), 4326)) as lon,
+                       ST_Y(ST_Transform(ST_Centroid(br.geom), 4326)) as lat
+                FROM buildings_result br
+                WHERE {loads_where}
+            """
+            if building_filter and len(building_filter) > 0:
+                loads_query += " AND br.osm_id = ANY(%s)"
+                loads_params.append(building_filter)
+
+            dbc.cur.execute(loads_query, loads_params)
+            loads_rows = dbc.cur.fetchall()
+
+            print(f"[Power Flow] Grid {grid_id}: {len(loads_rows)} buildings loaded" +
+                  (f" (filtered from {len(building_filter)} requested)" if building_filter else ""))
+
+            # Get all lines for this grid
+            lines_query = """
+                SELECT lines_result_id, line_name, std_type, from_bus, to_bus, length_km
+                FROM lines_result
+                WHERE grid_result_id = %s;
+            """
+            dbc.cur.execute(lines_query, (grid_id,))
+            lines_rows = dbc.cur.fetchall()
 
         # Get voltage limits and convergence settings
         min_vm_pu = payload.min_vm_pu if payload.min_vm_pu is not None else 0.9
