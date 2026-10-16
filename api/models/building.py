@@ -1,6 +1,6 @@
 """Building-related Pydantic models."""
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Literal, Optional, List
 
 
 class EstimateEnergyRequest(BaseModel):
@@ -25,7 +25,7 @@ class CustomBuildingRequest(BaseModel):
     demand_energy: Optional[float] = None  # Optional override for energy demand
     geometry: dict  # GeoJSON Point (building center)
     geometry_area: dict  # GeoJSON Polygon (building footprint)
-    is_public: Optional[bool] = False  # If true, visible to all users
+    is_public: Literal[False] = False  # Custom buildings are private; true is rejected with 422
     icon: Optional[str] = None  # Icon name for the building type
 
 

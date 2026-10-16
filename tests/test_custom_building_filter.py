@@ -10,13 +10,17 @@ import asyncio
 import json
 import unittest
 
-from models import GridRequest
+from pydantic import ValidationError
+
+from models import CustomBuildingRequest, GridRequest
+from routers.building import get_custom_buildings
 from routers.grid import generate_grid_phase1
 from src.database.database_client import DatabaseClient
 
 POLYGON = {"type": "Polygon", "coordinates": [[
     [8.8058, 53.0907], [8.8094, 53.0907], [8.8094, 53.0930], [8.8058, 53.0930], [8.8058, 53.0907]]]}
 OWNER = "owner-a"
+OTHER = "owner-b"
 
 # Same columns as the table api/routers/building.py creates on first use.
 CUSTOM_BUILDINGS_SQL = """
@@ -39,26 +43,29 @@ CREATE TABLE IF NOT EXISTS custom_buildings (
 """
 
 
+INSERT_SQL = """
+INSERT INTO custom_buildings (user_id, title, f_class, building_type, area, peak_load_kw, geom, is_public)
+VALUES (%s, %s, 'house', 'residential', 100, 5, ST_SetSRID(ST_MakePoint(8.807, 53.092), 4326), %s)
+RETURNING custom_building_id
+"""
+
+
 class CustomBuildingFilterTest(unittest.TestCase):
-    """A private custom building is returned to its owner only."""
+    """A custom building is returned to its owner only, even one stored with is_public."""
 
     def setUp(self):
         with DatabaseClient() as dbc:
             dbc.cur.execute(CUSTOM_BUILDINGS_SQL)
-            dbc.cur.execute(
-                """INSERT INTO custom_buildings (user_id, title, f_class, building_type, area, peak_load_kw,
-                                                 geom, is_public)
-                   VALUES (%s, 'private', 'house', 'residential', 100, 5,
-                           ST_SetSRID(ST_MakePoint(8.807, 53.092), 4326), FALSE)
-                   RETURNING custom_building_id""",
-                (OWNER,),
-            )
+            dbc.cur.execute(INSERT_SQL, (OWNER, "private", False))
             self.building_id = dbc.cur.fetchone()[0]
+            dbc.cur.execute(INSERT_SQL, (OTHER, "stored as public", True))
+            self.public_id = dbc.cur.fetchone()[0]
             dbc.conn.commit()
 
     def tearDown(self):
         with DatabaseClient() as dbc:
-            dbc.cur.execute("DELETE FROM custom_buildings WHERE custom_building_id = %s", (self.building_id,))
+            dbc.cur.execute("DELETE FROM custom_buildings WHERE custom_building_id = ANY(%s)",
+                            ([self.building_id, self.public_id],))
             dbc.conn.commit()
 
     def _custom_ids(self, **request) -> list:
@@ -75,6 +82,22 @@ class CustomBuildingFilterTest(unittest.TestCase):
 
     def test_excluded_building_is_left_out(self):
         self.assertNotIn(self.building_id, self._custom_ids(user_id=OWNER, excluded_building_ids=[self.building_id]))
+
+    def test_other_users_public_building_is_not_in_the_grid(self):
+        self.assertNotIn(self.public_id, self._custom_ids(user_id=OWNER))
+
+    def test_owner_still_sees_a_building_stored_as_public(self):
+        self.assertIn(self.public_id, self._custom_ids(user_id=OTHER))
+
+    def test_listing_returns_only_own_buildings(self):
+        listed = {b["id"] for b in asyncio.run(get_custom_buildings(OWNER))["buildings"]}
+        self.assertIn(self.building_id, listed)
+        self.assertNotIn(self.public_id, listed)
+
+    def test_a_new_building_cannot_be_public(self):
+        with self.assertRaises(ValidationError):
+            CustomBuildingRequest(user_id=OWNER, title="t", f_class="residential", area=100,
+                                  geometry={}, geometry_area={}, is_public=True)
 
 
 if __name__ == "__main__":
