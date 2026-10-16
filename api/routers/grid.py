@@ -628,25 +628,27 @@ def build_grid_response(payload: GridRequest, site_plz: str | None = None) -> di
             dbc.cur.execute("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'custom_buildings');")
             if dbc.cur.fetchone()[0] and site_plz is None:
                 user_id_param = payload.user_id or ''
-                include_public = payload.include_public_buildings if payload.include_public_buildings is not None else True
                 include_private = payload.include_private_buildings if payload.include_private_buildings is not None else True
                 excluded_ids = payload.excluded_building_ids or []
 
-                print(f"[Custom Buildings Filter] include_public={include_public}, include_private={include_private}, user_id={user_id_param}, excluded_ids={excluded_ids}")
+                print(f"[Custom Buildings Filter] include_private={include_private}, user_id={user_id_param}, excluded_ids={excluded_ids}")
 
+                # Custom buildings are private: only the requesting user's own are read.
                 visibility_conditions = []
-                if include_public:
-                    visibility_conditions.append("cb.is_public = TRUE")
+                visibility_params = []
                 if include_private and user_id_param:
-                    visibility_conditions.append(f"(cb.user_id = '{user_id_param}' AND (cb.is_public = FALSE OR cb.is_public IS NULL))")
+                    visibility_conditions.append("cb.user_id = %s")
+                    visibility_params.append(user_id_param)
 
                 if not visibility_conditions:
-                    print("[Custom Buildings] Both public and private are disabled - skipping custom buildings")
+                    print("[Custom Buildings] No user_id or private buildings disabled - skipping custom buildings")
                 else:
                     visibility_clause = " OR ".join(visibility_conditions)
                     exclusion_clause = ""
+                    exclusion_params = []
                     if excluded_ids:
-                        exclusion_clause = f" AND cb.custom_building_id NOT IN ({','.join(map(str, excluded_ids))})"
+                        exclusion_clause = " AND cb.custom_building_id <> ALL(%s)"
+                        exclusion_params.append(list(excluded_ids))
 
                     print(f"[Custom Buildings] Visibility clause: {visibility_clause}")
                     print(f"[Custom Buildings] Exclusion clause: {exclusion_clause}")
@@ -705,7 +707,7 @@ def build_grid_response(payload: GridRequest, site_plz: str | None = None) -> di
                     FROM custom_in_poly c;
                     """
 
-                    params = [json.dumps(payload.geom)]
+                    params = [json.dumps(payload.geom)] + visibility_params + exclusion_params
 
                     custom_buildings = gpd.GeoDataFrame.from_postgis(
                         query,
