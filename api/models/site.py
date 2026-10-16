@@ -60,4 +60,6 @@ class SiteTransformerInput(BaseModel):
     transformer_id: Optional[int] = None
     geom: SitePoint
     rated_kva: Optional[int] = Field(default=None, gt=0)
+    # EUR; null prices the station from the transformer cost table by its size
+    cost_eur: Optional[float] = Field(default=None, ge=0)
     assigned_building_ids: List[int] = Field(default_factory=list)

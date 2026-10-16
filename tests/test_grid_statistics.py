@@ -26,7 +26,7 @@ def _building(osm_id: str, vertice: int, grid: int = 1, peak: float = 10.0, hous
 LINES = [_line(1, 1, 2, 0.1), _line(2, 2, 3, 0.1), _line(3, 3, 4, 0.1),
          _line(4, 2, 20, 0.02), _line(5, 3, 30, 0.02), _line(6, 4, 40, 0.02), _line(7, 1, 1, 0.001)]
 BUILDINGS = [_building("a", 20), _building("b", 30), _building("c", 40)]
-TRANSFORMERS = [{"grid_result_id": 1, "rated_power": 400, "ont_vertice_id": 1}]
+TRANSFORMERS = [{"grid_result_id": 1, "rated_power": 400, "ont_vertice_id": 1, "cost_eur": None}]
 
 
 class CablePathsTest(unittest.TestCase):
@@ -75,7 +75,7 @@ class TransformerCostShareTest(unittest.TestCase):
         costs = self._costs(buildings, ["a"])
         self.assertEqual(costs["transformer_cost_eur"], 5000.0)
         self.assertEqual(costs["transformer_cost_breakdown"],
-                         [{"size_kva": 400, "cost_eur": 5000.0, "household_share": 0.5}])
+                         [{"size_kva": 400, "cost_eur": 5000.0, "cost_source": "lookup", "household_share": 0.5}])
 
     def test_building_without_households_counts_as_one_connection(self):
         buildings = [_building("a", 20, households=0), _building("b", 30), _building("c", 40)]
@@ -85,7 +85,16 @@ class TransformerCostShareTest(unittest.TestCase):
         rows = {"buildings": BUILDINGS, "lines": LINES, "transformers": TRANSFORMERS,
                 "transformer_costs": {400: 10000.0}}
         costs = selection_statistics(rows, ["a"], share_transformer_cost=False)["costs"]
-        self.assertEqual(costs["transformer_cost_breakdown"], [{"size_kva": 400, "cost_eur": 10000.0}])
+        self.assertEqual(costs["transformer_cost_breakdown"],
+                         [{"size_kva": 400, "cost_eur": 10000.0, "cost_source": "lookup"}])
+
+    def test_entered_station_cost_replaces_the_lookup(self):
+        rows = {"buildings": BUILDINGS, "lines": LINES, "transformer_costs": {400: 10000.0},
+                "transformers": [dict(TRANSFORMERS[0], cost_eur=0.0)]}
+        costs = selection_statistics(rows, ["a"], share_transformer_cost=False)["costs"]
+        self.assertEqual(costs["transformer_cost_breakdown"],
+                         [{"size_kva": 400, "cost_eur": 0.0, "cost_source": "user"}])
+        self.assertEqual(costs["transformer_cost_eur"], 0.0)
 
 
 if __name__ == "__main__":
