@@ -172,7 +172,7 @@ async def add_custom_building(payload: CustomBuildingRequest):
 
 @router.get("/custom-buildings/{user_id}")
 async def get_custom_buildings(user_id: str):
-    """Get all custom buildings for a user (their own + public buildings from others)."""
+    """Get a user's own custom buildings; other users' buildings are never returned."""
     try:
         import time as t
         start_time = t.time()
@@ -207,7 +207,7 @@ async def get_custom_buildings(user_id: str):
                 COALESCE(icon, 'building-2') as icon,
                 created_at
             FROM custom_buildings
-            WHERE user_id = %s OR is_public = TRUE
+            WHERE user_id = %s
             ORDER BY created_at DESC
             LIMIT 100;
         """

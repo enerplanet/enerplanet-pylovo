@@ -593,22 +593,20 @@ async def generate_grid_phase1(payload: GridRequest):
             dbc.cur.execute("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'custom_buildings');")
             if dbc.cur.fetchone()[0]:
                 user_id_param = payload.user_id or ''
-                include_public = payload.include_public_buildings if payload.include_public_buildings is not None else True
                 include_private = payload.include_private_buildings if payload.include_private_buildings is not None else True
                 excluded_ids = payload.excluded_building_ids or []
 
-                print(f"[Custom Buildings Filter] include_public={include_public}, include_private={include_private}, user_id={user_id_param}, excluded_ids={excluded_ids}")
+                print(f"[Custom Buildings Filter] include_private={include_private}, user_id={user_id_param}, excluded_ids={excluded_ids}")
 
+                # Custom buildings are private: only the requesting user's own are read.
                 visibility_conditions = []
                 visibility_params = []
-                if include_public:
-                    visibility_conditions.append("cb.is_public = TRUE")
                 if include_private and user_id_param:
-                    visibility_conditions.append("(cb.user_id = %s AND (cb.is_public = FALSE OR cb.is_public IS NULL))")
+                    visibility_conditions.append("cb.user_id = %s")
                     visibility_params.append(user_id_param)
 
                 if not visibility_conditions:
-                    print("[Custom Buildings] Both public and private are disabled - skipping custom buildings")
+                    print("[Custom Buildings] No user_id or private buildings disabled - skipping custom buildings")
                 else:
                     visibility_clause = " OR ".join(visibility_conditions)
                     exclusion_clause = ""
