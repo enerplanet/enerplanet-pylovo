@@ -600,18 +600,22 @@ async def generate_grid_phase1(payload: GridRequest):
                 print(f"[Custom Buildings Filter] include_public={include_public}, include_private={include_private}, user_id={user_id_param}, excluded_ids={excluded_ids}")
 
                 visibility_conditions = []
+                visibility_params = []
                 if include_public:
                     visibility_conditions.append("cb.is_public = TRUE")
                 if include_private and user_id_param:
-                    visibility_conditions.append(f"(cb.user_id = '{user_id_param}' AND (cb.is_public = FALSE OR cb.is_public IS NULL))")
+                    visibility_conditions.append("(cb.user_id = %s AND (cb.is_public = FALSE OR cb.is_public IS NULL))")
+                    visibility_params.append(user_id_param)
 
                 if not visibility_conditions:
                     print("[Custom Buildings] Both public and private are disabled - skipping custom buildings")
                 else:
                     visibility_clause = " OR ".join(visibility_conditions)
                     exclusion_clause = ""
+                    exclusion_params = []
                     if excluded_ids:
-                        exclusion_clause = f" AND cb.custom_building_id NOT IN ({','.join(map(str, excluded_ids))})"
+                        exclusion_clause = " AND cb.custom_building_id <> ALL(%s)"
+                        exclusion_params.append(list(excluded_ids))
 
                     print(f"[Custom Buildings] Visibility clause: {visibility_clause}")
                     print(f"[Custom Buildings] Exclusion clause: {exclusion_clause}")
@@ -669,7 +673,7 @@ async def generate_grid_phase1(payload: GridRequest):
                     FROM custom_in_poly c;
                     """
 
-                    params = [json.dumps(payload.geom)]
+                    params = [json.dumps(payload.geom)] + visibility_params + exclusion_params
 
                     custom_buildings = gpd.GeoDataFrame.from_postgis(
                         query,
