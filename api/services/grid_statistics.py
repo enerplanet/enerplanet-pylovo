@@ -18,10 +18,13 @@ LINES_SQL = """
     WHERE grid_result_id = ANY(%s);
 """
 
+# cost_eur is the cost a user entered for a site station; postcode grids have none.
 TRANSFORMERS_SQL = """
-    SELECT gr.grid_result_id, gr.transformer_rated_power, gr.ont_vertice_id
+    SELECT gr.grid_result_id, gr.transformer_rated_power, gr.ont_vertice_id, st.cost_eur
     FROM transformer_positions tp
     JOIN grid_result gr ON tp.grid_result_id = gr.grid_result_id
+    LEFT JOIN site_grid_transformer sg ON sg.grid_result_id = gr.grid_result_id
+    LEFT JOIN site_transformer st ON st.site_id = sg.site_id AND st.transformer_id = sg.site_transformer_id
     WHERE tp.grid_result_id = ANY(%s);
 """
 
@@ -46,7 +49,7 @@ def fetch_grid_rows(cur, grid_ids: list) -> dict:
             "households_per_building")),
         "lines": _fetch(cur, LINES_SQL, grid_ids, (
             "lines_result_id", "grid_result_id", "std_type", "from_bus", "to_bus", "length_km")),
-        "transformers": _fetch(cur, TRANSFORMERS_SQL, grid_ids, ("grid_result_id", "rated_power", "ont_vertice_id")),
+        "transformers": _fetch(cur, TRANSFORMERS_SQL, grid_ids, ("grid_result_id", "rated_power", "ont_vertice_id", "cost_eur")),
     }
     cur.execute(TRANSFORMER_COST_SQL)
     rows["transformer_costs"] = {int(kva): float(cost) for kva, cost in cur.fetchall()}
@@ -168,11 +171,16 @@ def household_shares(selected: list[dict], all_buildings: list[dict]) -> dict:
 
 
 def _transformer_costs(transformers: list[dict], costs: dict, shares: dict | None) -> list[dict]:
-    """Cost of each transformer, or with shares its household share of that cost."""
+    """Cost of each transformer, or with shares its household share of that cost.
+
+    A cost entered for the station (cost_source user) replaces the size-price lookup.
+    """
     breakdown = []
     for t in transformers:
+        entered = t["cost_eur"] is not None
         entry = {"size_kva": int(t["rated_power"]) if t["rated_power"] else 0,
-                 "cost_eur": _transformer_cost(t["rated_power"], costs)}
+                 "cost_eur": t["cost_eur"] if entered else _transformer_cost(t["rated_power"], costs),
+                 "cost_source": "user" if entered else "lookup"}
         if shares is not None:
             entry["household_share"] = round(shares.get(t["grid_result_id"], 0), 4)
             entry["cost_eur"] = round(entry["cost_eur"] * shares.get(t["grid_result_id"], 0), 2)

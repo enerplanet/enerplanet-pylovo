@@ -226,7 +226,8 @@ def ensure_runtime_schema(dbc: DatabaseClient) -> None:
                         ('oth', 'energy_label'),
                         ('oth', 'energy_index'),
                         ('equipment_data', 'equipment_only_cost_eur'),
-                        ('equipment_data', 'installed_cost_eur')
+                        ('equipment_data', 'installed_cost_eur'),
+                        ('site_transformer', 'cost_eur')
                 ),
                 existing AS (
                     SELECT table_name, column_name
@@ -290,6 +291,9 @@ def ensure_runtime_schema(dbc: DatabaseClient) -> None:
             dbc.cur.execute("ALTER TABLE IF EXISTS equipment_data ADD COLUMN IF NOT EXISTS installed_cost_eur INTEGER;")
             for table_name in SITE_TABLES:
                 dbc.cur.execute(CREATE_QUERIES[table_name])
+            dbc.cur.execute(
+                "ALTER TABLE site_transformer ADD COLUMN IF NOT EXISTS cost_eur DOUBLE PRECISION CHECK (cost_eur >= 0);"
+            )
             # Site extra loads reference categories that exist only in the config
             # until a generation run upserts them.
             dbc.insert_consumer_categories_from_config(consumer_categories=CONSUMER_CATEGORIES)

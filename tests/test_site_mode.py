@@ -8,6 +8,7 @@ they create, generate and delete sites. Run from the project root:
 
     python -m unittest tests.test_site_mode -v
 """
+import json
 import unittest
 
 import psycopg2
@@ -159,6 +160,59 @@ class SiteModeTest(unittest.TestCase):
         generate_site(self.site_id, self._site_revision())
         self.cur.execute(SHARED_TABLES_SQL)
         self.assertEqual(self.cur.fetchall(), before)
+
+
+
+class SiteTransformerCostTest(unittest.TestCase):
+    """A station's cost is stored and returned, and a cost-only edit keeps the revision.
+
+    Needs only the country row DE and the site tables, so it can run on its own:
+    python -m unittest tests.test_site_mode.SiteTransformerCostTest -v
+    """
+
+    def setUp(self):
+        self.conn = _connect()
+        self.cur = self.conn.cursor()
+        self.cur.execute(
+            """INSERT INTO site (user_id, name, country_code, geom)
+               VALUES ('test', 'cost test', 'DE', ST_Multi(ST_Transform(ST_SetSRID(ST_GeomFromGeoJSON(%s), 4326), 3035)))
+               RETURNING site_id""",
+            (json.dumps(TEST_POLYGON),),
+        )
+        self.site_id = self.cur.fetchone()[0]
+        self.cur.execute(
+            """INSERT INTO site_building (site_id, building_id, kind, geom)
+               SELECT site_id, b, 'res', geom FROM site, generate_series(1, 2) AS b WHERE site_id = %s""",
+            (self.site_id,),
+        )
+        station = {"transformer_id": None, "rated_kva": 400, "cost_eur": None, "assigned_building_ids": [1],
+                   "geom": {"type": "Point", "coordinates": [8.807, 53.092]}}
+        self.revision = transformers.replace_transformers(self.cur, self.site_id, [station])
+        self.conn.commit()
+
+    def tearDown(self):
+        self.cur.execute("DELETE FROM site WHERE site_id = %s", (self.site_id,))
+        self.conn.commit()
+        self.conn.close()
+
+    def _replace(self, **changes) -> int:
+        """Send back the station as GET returns it, with changes applied; return the revision."""
+        station = transformers.list_transformers(self.cur, self.site_id)[0]
+        station.update(changes)
+        revision = transformers.replace_transformers(self.cur, self.site_id, [station])
+        self.conn.commit()
+        return revision
+
+    def test_cost_only_edit_keeps_the_revision(self):
+        self.assertEqual(self._replace(cost_eur=8500.0), self.revision)
+        self.assertEqual(transformers.list_transformers(self.cur, self.site_id)[0]["cost_eur"], 8500.0)
+        self.assertEqual(self._replace(cost_eur=None), self.revision)
+
+    def test_size_assignment_or_position_edit_bumps_the_revision(self):
+        self.assertEqual(self._replace(rated_kva=630), self.revision + 1)
+        self.assertEqual(self._replace(assigned_building_ids=[1, 2]), self.revision + 2)
+        moved = {"type": "Point", "coordinates": [8.808, 53.092]}
+        self.assertEqual(self._replace(geom=moved), self.revision + 3)
 
 
 if __name__ == "__main__":

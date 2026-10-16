@@ -675,6 +675,7 @@ CREATE_QUERIES = {
         osm_id varchar,
         source varchar(4) NOT NULL CHECK (source IN ('osm', 'user')),
         rated_kva integer CHECK (rated_kva > 0),
+        cost_eur double precision CHECK (cost_eur >= 0),
         geom geometry(Point, 3035) NOT NULL,
         UNIQUE (site_id, transformer_id)
     );
