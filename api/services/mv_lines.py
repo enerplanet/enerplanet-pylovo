@@ -11,6 +11,34 @@ from scipy.sparse.csgraph import minimum_spanning_tree
 from scipy.sparse import csr_matrix
 
 
+def _chain_route_coords(route_geom, start_point) -> list:
+    """Return a routed path's coordinates as one ordered sequence.
+
+    ST_LineMerge leaves a MultiLineString when the route's edges do not merge
+    into one line. Its parts are chained by nearest endpoint, starting from the
+    end nearest start_point and reversing parts as needed.
+    """
+    if route_geom.geom_type == 'LineString':
+        return list(route_geom.coords)
+
+    parts = [list(part.coords) for part in route_geom.geoms]
+
+    def sq_dist(a, b):
+        return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2
+
+    chained = []
+    cursor = start_point
+    while parts:
+        best = min(range(len(parts)),
+                   key=lambda k: min(sq_dist(cursor, parts[k][0]), sq_dist(cursor, parts[k][-1])))
+        part = parts.pop(best)
+        if sq_dist(cursor, part[-1]) < sq_dist(cursor, part[0]):
+            part.reverse()
+        chained.extend(part if not chained or chained[-1] != part[0] else part[1:])
+        cursor = chained[-1]
+    return chained
+
+
 def generate_synthetic_mv_lines(transformers_gdf: gpd.GeoDataFrame, db_conn=None) -> gpd.GeoDataFrame:
     """
     Generate synthetic MV lines connecting transformers using Minimum Spanning Tree,
@@ -303,8 +331,7 @@ def generate_synthetic_mv_lines(transformers_gdf: gpd.GeoDataFrame, db_conn=None
 
         if route and route['geom']:
             # Add "hooks" connecting transformer points to the road path
-            route_geom = route['geom']
-            route_coords = list(route_geom.coords)
+            route_coords = _chain_route_coords(route['geom'], (trafo1_x, trafo1_y))
 
             # Determine which end of the route is closer to which transformer
             route_start = route_coords[0]
