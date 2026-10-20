@@ -2,6 +2,8 @@
 from pydantic import BaseModel
 from typing import Optional, List
 
+from .site import SiteGeometry
+
 
 class GridRequest(BaseModel):
     geom: dict  # GeoJSON Polygon or MultiPolygon
@@ -11,6 +13,11 @@ class GridRequest(BaseModel):
     include_boundary: Optional[bool] = False  # Include administrative boundary in response (extra DB work)
     include_private_buildings: Optional[bool] = True  # Include user's private custom buildings
     excluded_building_ids: Optional[List[int]] = None  # List of custom building IDs to exclude
+
+
+class BuildingCountRequest(BaseModel):
+    """Polygon whose generate-grid buildings are counted."""
+    geom: SiteGeometry
 
 
 class GridStatisticsRequest(BaseModel):

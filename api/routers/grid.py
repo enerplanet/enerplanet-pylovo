@@ -6,12 +6,14 @@ import time
 import traceback
 
 import geopandas as gpd
+import psycopg2
 import pandas as pd
 from shapely.geometry import LineString
 from fastapi import APIRouter, HTTPException
 
-from models import GridRequest, GridStatisticsRequest
+from models import BuildingCountRequest, GridRequest, GridStatisticsRequest
 from src.ai_estimation import estimate_building_energy
+from src.database.connection_pool import get_cursor
 from src.database.database_client import DatabaseClient
 from src.config_loader import CONSUMER_CATEGORIES
 from config.config_table_structure import CREATE_QUERIES, SITE_TABLES
@@ -405,6 +407,45 @@ async def generate_grid_phase1(payload: GridRequest):
     buildings for a given polygon.
     """
     return build_grid_response(payload)
+
+
+# Counting stops here, so a very large polygon stays an index-bounded query.
+BUILDING_COUNT_CAP = 10000
+
+# Same polygon handling and building filter as the /generate-grid buildings
+# query without a site; custom buildings are per user and not counted.
+BUILDING_COUNT_SQL = """
+WITH poly AS (
+  SELECT ST_Transform(ST_CollectionExtract(ST_MakeValid(
+           ST_SetSRID(ST_GeomFromGeoJSON(%(geom)s), %(srid)s)), 3), 3035) AS g
+)
+SELECT count(*) FROM (
+    SELECT 1 FROM buildings_result br, poly
+    WHERE br.version_id = %(version)s
+      AND br.vertice_id IS NOT NULL
+      AND br.osm_id NOT LIKE 'site:%%'
+      AND ST_Intersects(br.geom, poly.g)
+    LIMIT %(limit)s
+) hits
+"""
+
+
+@router.post("/building-count")
+def building_count(payload: BuildingCountRequest):
+    """Count the buildings /generate-grid would return for a polygon, without building a grid.
+
+    The count stops at BUILDING_COUNT_CAP; capped is true when it was reached.
+    """
+    geom = payload.geom.model_dump()
+    params = {"geom": json.dumps(geom), "srid": infer_input_srid(geom), "version": VERSION_ID,
+              "limit": BUILDING_COUNT_CAP}
+    try:
+        with get_cursor() as cur:
+            cur.execute(BUILDING_COUNT_SQL, params)
+            count = cur.fetchone()[0]
+    except (psycopg2.DataError, psycopg2.InternalError) as e:
+        raise HTTPException(status_code=400, detail=f"Invalid geometry: {e.pgerror or e}") from e
+    return {"count": count, "capped": count >= BUILDING_COUNT_CAP}
 
 
 def build_grid_response(payload: GridRequest, site_plz: str | None = None) -> dict:
