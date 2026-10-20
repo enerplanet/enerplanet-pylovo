@@ -11,11 +11,15 @@ FROM (SELECT {GEOJSON_TO_3035} AS geom) g, site s
 WHERE s.site_id = %(site)s
 """
 
-# kind 'res' keeps the floors the caller sends, which the household estimate uses.
+# kind follows the class's load method, which matches the res/oth split of
+# OSM buildings for all but a few classes. Only kind 'res' keeps the floors the
+# caller sends; the household estimate uses them.
 INSERT_SQL = f"""
 INSERT INTO site_building (site_id, building_id, osm_id, kind, area, f_class, geom, floors, source, source_id)
-SELECT %(site)s, %(id)s, NULL, 'res', ST_Area(g.geom), %(f_class)s, g.geom, %(floors)s, %(source)s, %(source_id)s
+SELECT %(site)s, %(id)s, NULL, CASE cc.load_method WHEN 'household' THEN 'res' ELSE 'oth' END,
+       ST_Area(g.geom), %(f_class)s, g.geom, %(floors)s, %(source)s, %(source_id)s
 FROM (SELECT {GEOJSON_TO_3035} AS geom) g
+JOIN consumer_categories cc ON cc.definition = %(f_class)s
 """
 
 
