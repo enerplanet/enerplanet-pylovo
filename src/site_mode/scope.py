@@ -26,15 +26,19 @@ def check_site_grids(cur, site_id: int, revision: int, grid_ids: list) -> None:
 
 
 def site_building_keys(cur, site_id: int, osm_ids: list) -> list:
-    """Map real OSM ids to the keys a site's buildings and their extra loads carry in buildings_result."""
+    """Map building ids to the keys a site's buildings and their extra loads carry in buildings_result.
+
+    An id matches a copied building's OSM id or an added building's source_id,
+    since buildings added from a 3D source have no OSM id.
+    """
     cur.execute(
         """SELECT 'site:' || sb.site_id || ':' || sb.building_id FROM site_building sb
-           WHERE sb.site_id = %(site)s AND sb.osm_id = ANY(%(ids)s::text[])
+           WHERE sb.site_id = %(site)s AND (sb.osm_id = ANY(%(ids)s::text[]) OR sb.source_id = ANY(%(ids)s::text[]))
            UNION ALL
            SELECT 'site:' || l.site_id || ':' || l.building_id || ':' || l.category
            FROM site_building_load l
            JOIN site_building sb ON sb.site_id = l.site_id AND sb.building_id = l.building_id
-           WHERE l.site_id = %(site)s AND sb.osm_id = ANY(%(ids)s::text[])""",
+           WHERE l.site_id = %(site)s AND (sb.osm_id = ANY(%(ids)s::text[]) OR sb.source_id = ANY(%(ids)s::text[]))""",
         {"site": site_id, "ids": osm_ids},
     )
     return [r[0] for r in cur.fetchall()]
