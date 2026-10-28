@@ -78,6 +78,7 @@ class TransformerSpec(ComponentSpec):
     bus2: str = ""  # Secondary (LV) side bus name
     kva: float = 630.0  # Rated apparent power in kVA
     parallel: int = 1  # Number of parallel transformers
+    fixed_rating: bool = False  # A known rating that reinforcement must not upgrade
 
     def __post_init__(self):
         self.component_type = "transformer"

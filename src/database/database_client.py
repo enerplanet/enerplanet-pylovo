@@ -15,11 +15,12 @@ from src.database.clustering_mixin import ClusteringMixin
 from src.database.grid_mixin import GridMixin
 from src.database.analysis_mixin import AnalysisMixin
 from src.database.utils_mixin import UtilsMixin
+from src.database.site_mixin import SiteMixin
 
 warnings.simplefilter(action='ignore', category=UserWarning)
 
 
-class DatabaseClient(PreprocessingMixin, ClusteringMixin, GridMixin, AnalysisMixin, UtilsMixin):
+class DatabaseClient(PreprocessingMixin, ClusteringMixin, GridMixin, AnalysisMixin, UtilsMixin, SiteMixin):
     """Main database client handling connections."""
 
     def __init__(self, dbname=DBNAME, user=DBUSER, pw=PASSWORD, host=HOST, port=PORT, **kwargs):

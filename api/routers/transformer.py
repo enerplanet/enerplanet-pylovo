@@ -770,6 +770,8 @@ async def delete_transformer(payload: dict):
             "message": f"Deleted transformer {grid_result_id} and reassigned {len(buildings_to_reassign)} buildings."
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))

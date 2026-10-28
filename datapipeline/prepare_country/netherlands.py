@@ -47,6 +47,15 @@ except ImportError as e:
 # Configuration
 CBS_PC4_URL = "https://geodata.cbs.nl/files/PDOK/cbs_pc4_2023_v2.zip"
 CBS_KERNCIJFERS_URL = "https://www.cbs.nl/-/media/_excel/2024/35/kwb-2022.zip"  # Key figures per postcode
+
+# PDOK CBS gebiedsindelingen WFS - generalised province polygons. The CBS
+# Kerncijfers PC4 files (xlsx and gpkg) carry no province/municipality column,
+# so state_code is derived by a point-in-polygon join against these.
+PDOK_PROVINCE_WFS = (
+    "https://service.pdok.nl/cbs/gebiedsindelingen/2025/wfs/v1_0"
+    "?service=WFS&version=2.0.0&request=GetFeature"
+    "&typeName=provincie_gegeneraliseerd&outputFormat=application/json&srsName=EPSG:3035"
+)
 CBS_POSTCODE_DOWNLOADS_PAGE_URL = (
     "https://www.cbs.nl/nl-nl/dossier/nederland-regionaal/geografische-data/gegevens-per-postcode"
 )
@@ -407,6 +416,40 @@ def process_kerncijfers(download_dir: Path) -> pd.DataFrame:
     return df
 
 
+def _assign_state_by_province_join(gdf_pc4: gpd.GeoDataFrame, postcode_col: str) -> dict:
+    """Map each PC4 to a pylovo state_code by point-in-polygon against PDOK provinces.
+
+    gdf_pc4 must already be in EPSG:3035. Returns {pc4_str: state_code}. Empty on
+    any failure so the caller can fall back to the deferred spatial assignment
+    that main_constructor does from building locations.
+    """
+    try:
+        resp = requests.get(PDOK_PROVINCE_WFS, timeout=60)
+        resp.raise_for_status()
+        gdf_prov = gpd.read_file(resp.text)
+    except Exception as e:
+        print(f"   [WARN] Could not fetch PDOK province boundaries: {e}")
+        return {}
+
+    if gdf_prov.empty or "statnaam" not in gdf_prov.columns:
+        print("   [WARN] PDOK province response has no 'statnaam' field")
+        return {}
+
+    gdf_prov = gdf_prov.to_crs("EPSG:3035")[["statnaam", "geometry"]]
+    points = gdf_pc4[[postcode_col, "geometry"]].copy()
+    points["geometry"] = points.geometry.representative_point()
+
+    joined = gpd.sjoin(points, gdf_prov, how="left", predicate="within")
+    pc_to_state = {}
+    for _, row in joined.iterrows():
+        pc = _normalize_pc4_value(row[postcode_col]) or str(row[postcode_col]).strip()
+        state_code = PROVINCE_MAPPING.get(row.get("statnaam"))
+        if state_code:
+            pc_to_state[pc] = state_code
+    print(f"   [OK] Province join mapped {len(pc_to_state)}/{len(points)} postcodes to states")
+    return pc_to_state
+
+
 def convert_to_pylovo_postcode(gdf: gpd.GeoDataFrame, df_pop: pd.DataFrame = None) -> pd.DataFrame:
     """Convert CBS geodata to Pylovo postcode format."""
     print("\n" + "=" * 60)
@@ -505,9 +548,11 @@ def convert_to_pylovo_postcode(gdf: gpd.GeoDataFrame, df_pop: pd.DataFrame = Non
             
             if pop_prov_col:
                 print(f"   [OK] Mapped {len(pc_to_state)} postcodes to states")
-            else:
-                print("   [INFO] Current CBS PC4 workbook has no province column; state_code remains empty at prepare step")
-    
+
+    if not pc_to_state:
+        print("   Population data carries no province column; deriving state_code by spatial join...")
+        pc_to_state = _assign_state_by_province_join(gdf, postcode_col)
+
     # Find area column in GDF
     area_col = None
     for col in ['oppervlakte_land_in_ha', 'OPP_LAND', 'area', 'oppervlakte']:

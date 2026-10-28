@@ -23,7 +23,7 @@ from src.database.database_client import DatabaseClient
 from src import cache
 
 # Include modular routers
-from routers import reference, pipeline, power_flow, energy, transformer, building, grid, boundary
+from routers import reference, pipeline, power_flow, energy, transformer, building, grid, boundary, site
 app.include_router(reference.router)
 app.include_router(pipeline.router)
 app.include_router(power_flow.router)
@@ -32,6 +32,7 @@ app.include_router(transformer.router)
 app.include_router(building.router)
 app.include_router(grid.router)
 app.include_router(boundary.router)
+app.include_router(site.router)
 
 # Package version of the occupancy tag pinned in requirements.txt; the two must
 # change together. Git tag vX.Y.Z-enerplanet.N carries version X.Y.Z+enerplanet.N.

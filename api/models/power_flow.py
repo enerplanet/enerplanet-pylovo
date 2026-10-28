@@ -11,6 +11,9 @@ class PowerFlowRequest(BaseModel):
     user_id: Optional[str] = None
     model_id: Optional[int] = None
     draft_id: Optional[str] = None
+    # Site grids: both required together; the grid must be of this generated revision
+    site_id: Optional[int] = None
+    revision: Optional[int] = None
     # Voltage limits (EN 50160: ±10% for LV)
     min_vm_pu: Optional[float] = 0.9  # Minimum voltage in per-unit
     max_vm_pu: Optional[float] = 1.1  # Maximum voltage in per-unit

@@ -50,6 +50,12 @@ class GridGenerator:
         self._transformer_data_cache_by_plz = {}
         self.current_stage = "init"
         self.current_stage_started_at = time.time()
+        # Site mode reads the site tables instead of res, oth and transformers.
+        self.site_id = kwargs.get("site_id")
+        # (kcid, bcid) -> (site transformer id, loading %) for site stations.
+        self.site_brownfield = {}
+        self.site_unroutable_building_ids = []
+        self.site_known_clusters = set()
 
     def __del__(self):
         self.dbc.__del__()
@@ -383,6 +389,8 @@ class GridGenerator:
         self._run_stage("prepare_transformers", self.prepare_transformers)
         self._run_stage("prepare_ways", self.prepare_ways)
         self._run_stage("apply_kmeans_clustering", self.apply_kmeans_clustering)
+        if self.site_id is not None:
+            self.site_unroutable_building_ids = self.dbc.get_site_unroutable_assignments(self.site_id)
         self._run_stage("position_all_transformers", self.position_all_transformers)
         self._run_stage("install_cables", self.install_cables)
 
@@ -417,6 +425,8 @@ class GridGenerator:
             else:
                 buildings_data = self.inf_dbc.fetch_buildings_from_infdb(self.plz)
                 self.dbc.set_buildings_table(buildings_data, self.plz)
+        elif self.site_id is not None:
+            self.dbc.set_site_buildings_table(self.site_id, self.plz)
         else:
             self.dbc.set_residential_buildings_table(self.plz, self.country_code)
             self.dbc.set_other_buildings_table(self.plz, self.country_code)
@@ -448,6 +458,8 @@ class GridGenerator:
             self.logger.warning(f"Settlement type classification failed: {e}")
 
         unloadcount = self.dbc.set_building_peak_load()
+        if self.site_id is not None:
+            self.dbc.apply_site_demand_overrides(self.site_id, self.plz)
         self.logger.info(
             f"Building peakload calculated in buildings_tem, {unloadcount} unloaded buildings are removed from "
             f"buildings_tem"
@@ -464,6 +476,10 @@ class GridGenerator:
         FROM: transformers
         INTO: buildings_tem
         """
+        if self.site_id is not None:
+            # Site stations are entered deliberately, including those inside buildings.
+            self.dbc.insert_site_transformers(self.site_id, self.plz)
+            return
         self.dbc.insert_transformers(self.plz, self.country_code)
         self.logger.info("Transformers inserted into buildings_tem table")
         self.dbc.count_indoor_transformers()
@@ -504,6 +520,10 @@ class GridGenerator:
         self.dbc.update_ways_cost()
         unconn = self.dbc.set_vertice_id()
         self.logger.debug(f"vertice id set, {unconn} buildings with no vertice id")
+        if self.site_id is not None:
+            unattached = self.dbc.snap_site_transformers_to_network()
+            if unattached:
+                self.logger.warning(f"[PLZ {self.plz}] {unattached} site stations have no road within 200 m")
 
     def apply_kmeans_clustering(self):
         """
@@ -629,12 +649,16 @@ class GridGenerator:
         INTO: buildings_tem, grid_result
         """
         kcid_length = self.dbc.get_kcid_length()
+        # A kcid can finish without a grid_result row; excluding attempted kcids
+        # stops it from being picked again and starving the kcids after it.
+        attempted_kcids = []
 
         for _ in range(kcid_length):
-            kcid = self.dbc.get_next_unfinished_kcid(self.plz, self.country_code)
+            kcid = self.dbc.get_next_unfinished_kcid(self.plz, self.country_code, exclude=attempted_kcids)
             if kcid is None:
                 self.logger.debug("No unfinished kcids remain for plz %s.", self.plz)
                 break
+            attempted_kcids.append(kcid)
             self.current_stage = f"position_all_transformers:kcid={kcid}"
             self.current_stage_started_at = time.time()
             self.logger.debug(f"working on kcid {kcid}")
@@ -689,7 +713,10 @@ class GridGenerator:
                 if bcid >= 0:
                     self.position_greenfield_transformers(self.plz, kcid, bcid)
                     self.logger.debug(f"Transformer positioning for kcid{kcid}, bcid{bcid} finished")
-                    self.dbc.update_transformer_rated_power(self.plz, kcid, bcid, 1, self.country_code)
+                    self.dbc.update_transformer_rated_power(
+                        self.plz, kcid, bcid, 1, self.country_code,
+                        use_existing_capacity=self.site_id is None,
+                    )
                     self.logger.debug("Transformer_rated_power in grid_result updated.")
 
     def dimension_bcid_for_kcid(self, plz: int, kcid: int) -> None:
@@ -759,6 +786,32 @@ class GridGenerator:
         dist_vector = squareform(dist_mat)
 
         if len(dist_vector) == 0:
+            # Consumers sharing one connection point give no pair to cluster; they
+            # become one bcid. Ported from tum-ens/pylovo@2503a3e.
+            vertices = sorted(buildings["connection_point"].dropna().astype(int).unique().tolist())
+            if len(vertices) == 1:
+                total_sim_load = utils.simultaneousPeakLoad(buildings, consumer_cat_df, vertices)
+                required_kva = utils.required_apparent_power_kva(
+                    total_sim_load, DEFAULT_POWER_FACTOR, TRANSFORMER_LOADING_MARGIN
+                )
+                feasible = transformer_capacities[transformer_capacities >= required_kva]
+                transformer_size = int(feasible[0]) if len(feasible) else int(math.ceil(required_kva))
+                self.dbc.clear_grid_result_in_kmean_cluster(
+                    plz, kcid, only_greenfield=False, country_code=self.country_code
+                )
+                self.dbc.upsert_bcid(
+                    plz, kcid, 1, vertices=vertices,
+                    transformer_rated_power=transformer_size, country_code=self.country_code,
+                )
+                self.logger.info(
+                    "Single connection point in PLZ %s KCID %s assigned to BCID 1 with %s kVA",
+                    plz, kcid, transformer_size,
+                )
+                return
+            self.logger.warning(
+                "Skipped BCID dimensioning for PLZ %s KCID %s: no routable pair among %s connection points",
+                plz, kcid, len(vertices),
+            )
             return
 
         # Initialize hierarchical clustering
@@ -877,10 +930,13 @@ class GridGenerator:
         # Pre-fetch all building loads for this kcid to avoid per-assignment SQL queries
         building_loads = self.dbc.prefetch_building_loads_for_kcid(kcid)
 
-        # Initialize tracking variables
-        pre_result_dict = {transformer_id: [] for transformer_id in transformer_list}
+        known_kva, fixed = self._site_brownfield_constraints(kcid)
+
+        # Initialise tracking variables; fixed site assignments come first and
+        # are not subject to the distance limit or the capacity check.
+        pre_result_dict = {transformer_id: list(fixed.get(transformer_id, [])) for transformer_id in transformer_list}
         full_transformer_list = []
-        assigned_consumer_list = []
+        assigned_consumer_list = [c for consumers in pre_result_dict.values() for c in consumers]
 
         # Assign consumers to closest transformer
         for _, row in cost_df.iterrows():
@@ -898,7 +954,7 @@ class GridGenerator:
             sim_load_kw = float(self.dbc.calculate_sim_load_from_cache(pre_result_dict[end_transformer_id], building_loads))
             required_kva = self._required_transformer_capacity_kva(sim_load_kw)
 
-            if required_kva > max(possible_transformers):
+            if required_kva > known_kva.get(end_transformer_id, max(possible_transformers)):
                 # Remove consumer and mark transformer as full
                 pre_result_dict[end_transformer_id].pop()
                 full_transformer_list.append(end_transformer_id)
@@ -930,18 +986,34 @@ class GridGenerator:
             sim_load_kw = float(self.dbc.calculate_sim_load_from_cache(pre_result_dict[transformer_id], building_loads))
             required_kva = self._required_transformer_capacity_kva(sim_load_kw)
 
-            # Select the smallest transformer that is larger than the simulated load
-            candidates = possible_transformers[possible_transformers >= required_kva]
-            if len(candidates) > 0:
-                transformer_rated_power = candidates[0].item()
+            # A known site rating is kept even when its fixed buildings exceed it.
+            if transformer_id in known_kva:
+                transformer_rated_power = int(known_kva[transformer_id])
+                self.site_known_clusters.add((kcid, building_cluster_count))
             else:
-                transformer_rated_power = possible_transformers[-1].item()  # use largest available
-
+                # Select the smallest transformer that is larger than the simulated load
+                candidates = possible_transformers[possible_transformers >= required_kva]
+                if len(candidates) > 0:
+                    transformer_rated_power = candidates[0].item()
+                else:
+                    transformer_rated_power = possible_transformers[-1].item()  # use largest available
             # Update database with new building cluster
-            self.dbc.update_building_cluster(transformer_id, pre_result_dict[transformer_id], building_cluster_count, kcid,
-                plz, transformer_rated_power, self.country_code)
+            station_key = self.dbc.update_building_cluster(transformer_id, pre_result_dict[transformer_id],
+                building_cluster_count, kcid, plz, transformer_rated_power, self.country_code)
+            if self.site_id is not None:
+                loading_pct = (100.0 * utils.required_apparent_power_kva(sim_load_kw, DEFAULT_POWER_FACTOR)
+                               / transformer_rated_power)
+                self.site_brownfield[(kcid, building_cluster_count)] = (
+                    int(station_key.split(":")[1]), loading_pct)
 
         self.logger.info("Brownfield clusters completed")
+
+    def _site_brownfield_constraints(self, kcid: int) -> tuple[dict, dict]:
+        """Return the kcid's known site ratings and fixed assignments; empty outside site mode."""
+        if self.site_id is None:
+            return {}, {}
+        return (self.dbc.get_site_known_ratings(self.site_id, kcid),
+                self.dbc.get_site_fixed_assignments(self.site_id, kcid))
 
 
     def position_greenfield_transformers(self, plz, kcid, bcid):
@@ -1292,7 +1364,8 @@ class GridGenerator:
             
             # Create network components
             installer.create_lvmv_bus(self.plz, kcid, bcid, self.country_code)
-            installer.create_transformer(self.plz, kcid, bcid, self.country_code)
+            installer.create_transformer(self.plz, kcid, bcid, self.country_code,
+                                         fixed_rating=(kcid, bcid) in self.site_known_clusters)
             installer.create_connection_bus(connection_nodes)
             installer.create_consumer_bus_and_load(consumer_list, sim_load_per_building, buildings_df, load_type)
 

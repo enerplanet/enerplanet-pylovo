@@ -2,6 +2,8 @@
 from pydantic import BaseModel
 from typing import Optional, List
 
+from .site import SiteGeometry
+
 
 class GridRequest(BaseModel):
     geom: dict  # GeoJSON Polygon or MultiPolygon
@@ -13,5 +15,15 @@ class GridRequest(BaseModel):
     excluded_building_ids: Optional[List[int]] = None  # List of custom building IDs to exclude
 
 
+class BuildingCountRequest(BaseModel):
+    """Polygon whose generate-grid buildings are counted."""
+    geom: SiteGeometry
+
+
 class GridStatisticsRequest(BaseModel):
     grid_result_ids: List[int]
+    # Scope the statistics to these buildings, their transformers and their cable paths
+    building_osm_ids: Optional[List[str]] = None
+    # Site grids: both required together; the grids must be of this generated revision
+    site_id: Optional[int] = None
+    revision: Optional[int] = None

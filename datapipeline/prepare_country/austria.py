@@ -10,6 +10,9 @@ Data sources:
   - Municipality→PLZ mapping: Statistik Austria Gemeindeliste CSV
   - State assignment: Statistik Austria political-district → Bundesland mapping
 
+All three are Statistik Austria open data under CC BY 4.0.
+Attribution: "Datenquelle: Statistik Austria".
+
 Usage:
     python -m datapipeline.prepare_country austria
 """
@@ -27,9 +30,13 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from datapipeline.prepare_country.base import CountryDataPreparer
 
 # Statistik Austria URLs
+# Statistik Austria publishes one edition per 1 January and has no stable
+# "latest" link; the edition year must match the Gemeindeliste key date.
+# Listing: https://data.statistik.gv.at/web/meta.jsp?dataset=OGDEXT_GEM_1
 _GEM_SHP_URL = (
-    "https://data.statistik.gv.at/data/"
-    "OGDEXT_GEM_1_STATISTIK_AUSTRIA_20250101.zip"
+    "https://www.statistik.gv.at/gs-open/GEODATA/ows?service=WFS&version=1.0.0"
+    "&request=GetFeature&typeName=GEODATA:STATISTIK_AUSTRIA_GEM_20260101"
+    "&outputFormat=SHAPE-ZIP&format_options=CHARSET:UTF-8"
 )
 _GEM_LIST_URL = (
     "https://www.statistik.at/verzeichnis/reglisten/gemliste_knz_en.csv"

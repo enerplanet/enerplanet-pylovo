@@ -6,7 +6,10 @@ from decimal import *
 from typing import *
 
 import numpy as np
+import pandas as pd
+import scipy.sparse
 from scipy.cluster.hierarchy import cut_tree
+from scipy.sparse.csgraph import dijkstra
 
 from src import utils
 from src.config_loader import *
@@ -211,20 +214,65 @@ class ClusteringMixin(BaseMixin, ABC):
         Returns: The distance matrix of the buildings in the k-means cluster as np.array and the mapping between vertice_id and local ID as dict
         """
 
-        costmatrix_query = """SELECT * \
-                              FROM pgr_dijkstraCostMatrix( \
-                                      'SELECT way_id as id, source, target, cost, reverse_cost FROM ways_tem', \
-                                      (SELECT array_agg(DISTINCT b.connection_point) \
-                                       FROM (SELECT * \
-                                             FROM buildings_tem \
-                                             WHERE kcid = %(k)s \
-                                               AND bcid ISNULL \
-                                             ORDER BY connection_point) AS b), \
-                                      false);"""
-        params = {"k": kcid}
-        localid2vid, dist_mat, _ = self.calculate_cost_arr_dist_matrix(costmatrix_query, params)
+        self.cur.execute(
+            """SELECT DISTINCT connection_point
+               FROM buildings_tem
+               WHERE kcid = %(k)s
+                 AND bcid ISNULL
+                 AND connection_point IS NOT NULL;""",
+            {"k": kcid},
+        )
+        return self.street_distance_matrix([row[0] for row in self.cur.fetchall()])
 
-        return localid2vid, dist_mat, _
+    def street_distance_matrix(self, points: list[int], chunk_size: int = 256) -> tuple[dict, np.ndarray, dict]:
+        """Return the undirected street-distance matrix between ``points`` (vertices of ``ways_tem``).
+
+        Same result as ``calculate_cost_arr_dist_matrix`` over ``pgr_dijkstraCostMatrix``: vertices
+        ordered by id, points that reach no other point dropped, 0 for pairs without a path. Computed
+        with scipy so the dense n x n matrix is never built inside PostgreSQL, where it exhausted the
+        server's memory on large kcids. Ported from tum-ens/pylovo@d13e085.
+
+        Args:
+            points: Vertex ids.
+            chunk_size: Source vertices per Dijkstra call (memory: chunk_size x vertices floats).
+
+        Returns:
+            ``(localid2vid, dist_matrix, vid2localid)``.
+        """
+        self.cur.execute("""SELECT source, target, cost, reverse_cost
+                            FROM ways_tem
+                            WHERE source IS NOT NULL AND target IS NOT NULL;""")
+        edges = np.asarray(self.cur.fetchall(), dtype=float).reshape(-1, 4)
+        vertices = np.unique(edges[:, :2])
+        source = np.searchsorted(vertices, edges[:, 0])
+        target = np.searchsorted(vertices, edges[:, 1])
+        # An edge is usable with the smaller of its non-negative costs; parallel edges keep
+        # their minimum instead of being summed by the sparse matrix.
+        weight = np.fmin(np.where(edges[:, 2] >= 0, edges[:, 2], np.inf),
+                         np.where(edges[:, 3] >= 0, edges[:, 3], np.inf))
+        keep = (source != target) & np.isfinite(weight)
+        pairs = pd.DataFrame({"a": np.minimum(source, target)[keep], "b": np.maximum(source, target)[keep],
+                              "w": weight[keep]}).groupby(["a", "b"], sort=True)["w"].min()
+        graph = scipy.sparse.csr_matrix(
+            (pairs.to_numpy(), (pairs.index.get_level_values("a"), pairs.index.get_level_values("b"))),
+            shape=(len(vertices), len(vertices)),
+        )
+
+        points = np.asarray(sorted(int(p) for p in points), dtype=np.int64)
+        points = points[np.isin(points, vertices)]
+        point_index = np.searchsorted(vertices, points)
+        distances = np.vstack(
+            [dijkstra(graph, directed=False, indices=point_index[i:i + chunk_size])[:, point_index]
+             for i in range(0, len(point_index), chunk_size)]
+        ) if len(point_index) else np.zeros((0, 0))
+        np.fill_diagonal(distances, np.inf)
+        connected = np.isfinite(distances).any(axis=1)
+        distances = distances[np.ix_(connected, connected)]
+        dist_matrix = self._canonicalize_distance_matrix(np.where(np.isfinite(distances), distances, 0.0))
+
+        localid2vid = dict(enumerate(points[connected].astype(np.int32)))
+        vid2localid = {y: x for x, y in localid2vid.items()}
+        return localid2vid, dist_matrix, vid2localid
 
     def calculate_cost_arr_dist_matrix(self, costmatrix_query: str, params: dict) -> tuple[dict, np.ndarray, dict]:
         """
@@ -548,7 +596,7 @@ class ClusteringMixin(BaseMixin, ABC):
         kcid_length = self.cur.fetchone()[0]
         return kcid_length
 
-    def get_next_unfinished_kcid(self, plz: int, country_code: str = "DE") -> int | None:
+    def get_next_unfinished_kcid(self, plz: int, country_code: str = "DE", exclude: list[int] | None = None) -> int | None:
         """
         :return: one unmodeled k mean cluster ID - plz
         """
@@ -560,9 +608,10 @@ class ClusteringMixin(BaseMixin, ABC):
                                         AND grid_result.plz = %(plz)s
                                         AND grid_result.country_code = %(cc)s)
                      AND kcid IS NOT NULL
+                     AND NOT (kcid = ANY(%(exclude)s))
                    ORDER BY kcid
                    LIMIT 1;"""
-        self.cur.execute(query, {"v": VERSION_ID, "plz": plz, "cc": country_code})
+        self.cur.execute(query, {"v": VERSION_ID, "plz": plz, "cc": country_code, "exclude": list(exclude or [])})
         row = self.cur.fetchone()
         return row[0] if row else None
 
@@ -882,6 +931,7 @@ class ClusteringMixin(BaseMixin, ABC):
         bcid: int,
         note: int,
         country_code: str = "DE",
+        use_existing_capacity: bool = True,
     ):
         """
         Update the field transformer_rated_power in grid_result for a given building cluster (bcid).
@@ -910,7 +960,10 @@ class ClusteringMixin(BaseMixin, ABC):
         None. Performs an in‑place database update.
         """
         # First check if there's an existing transformer with a specific capacity
-        existing_capacity = self.get_existing_transformer_capacity_trafo_ui(plz, kcid, bcid)
+        # Site mode passes False: the lookup reads the shared transformers table.
+        existing_capacity = (
+            self.get_existing_transformer_capacity_trafo_ui(plz, kcid, bcid) if use_existing_capacity else None
+        )
         if existing_capacity is not None:
             # Use the existing transformer capacity
             update_query = """UPDATE grid_result
@@ -1008,7 +1061,7 @@ class ClusteringMixin(BaseMixin, ABC):
         return np.array(capacities), transformer2cost
 
     def update_building_cluster(self, transformer_id: int, conn_id_list: Union[list, tuple], count: int, kcid: int,
-            plz: int, transformer_rated_power: int, country_code: str = "DE") -> None:
+            plz: int, transformer_rated_power: int, country_code: str = "DE") -> str:
         """
         Update building cluster information by performing multiple operations:
           - Update the 'bcid' in 'buildings_tem' where 'vertice_id' matches the transformer_id.
@@ -1106,13 +1159,18 @@ class ClusteringMixin(BaseMixin, ABC):
                 f"Transformer vertex {transformer_id} not found in buildings_tem (plz={plz}, kcid={kcid})."
             )
 
+        # osm_id references the shared transformers table; site stations are not
+        # in it, so their key is returned to the caller instead of stored.
+        station_key = transformer_row[1]
+        stored_osm_id = None if str(station_key).startswith("site_transformer:") else station_key
         self.cur.execute(
             """
             INSERT INTO transformer_positions (version_id, grid_result_id, geom, osm_id, comment)
             VALUES (%s, %s, %s, %s, 'Normal');
             """,
-            (VERSION_ID, grid_result_id, transformer_row[0], transformer_row[1]),
+            (VERSION_ID, grid_result_id, transformer_row[0], stored_osm_id),
         )
+        return station_key
 
     def calculate_sim_load(self, conn_list: Union[tuple, list]) -> Decimal:
         if not conn_list:
