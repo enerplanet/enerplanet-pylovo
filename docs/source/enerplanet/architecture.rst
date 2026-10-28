@@ -454,7 +454,7 @@ Languages & Frameworks
    * - Webservice
      - Go, Gin
    * - PyLovo
-     - Python 3.10, FastAPI
+     - Python 3.12, FastAPI
 
 Databases
 ^^^^^^^^^
