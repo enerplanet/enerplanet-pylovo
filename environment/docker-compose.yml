@@ -7,7 +7,7 @@ services:
       - "8086:80"
       - "8404:8404"  # Stats dashboard
     volumes:
-      - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+      - ../haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
     depends_on:
       - pylovo-api-1
       - pylovo-api-2
@@ -96,20 +96,22 @@ services:
 
   # PyLovo API Instance 1
   pylovo-api-1:
-    build: .
+    build:
+      context: ..
+      dockerfile: environment/Dockerfile
     container_name: pylovo-api-1
     extra_hosts:
       - "host.docker.internal:host-gateway"
     env_file:
-      - .env.docker
+      - ../.env.docker
     volumes:
-      - ./raw_data:/app/raw_data
-      - ./api:/app/api:ro
-      - ./src:/app/src:ro
-      - ./runme:/app/runme:ro
-      - ./datapipeline:/app/datapipeline:ro
-      - ./datapipeline/cache:/app/datapipeline/cache
-      - ./config:/app/config:ro
+      - ../raw_data:/app/raw_data
+      - ../api:/app/api:ro
+      - ../src:/app/src:ro
+      - ../runme:/app/runme:ro
+      - ../datapipeline:/app/datapipeline:ro
+      - ../datapipeline/cache:/app/datapipeline/cache
+      - ../config:/app/config:ro
     environment:
       - HOST=postgres
       - PORT=5432
@@ -130,19 +132,21 @@ services:
 
   # PyLovo API Instance 2
   pylovo-api-2:
-    build: .
+    build:
+      context: ..
+      dockerfile: environment/Dockerfile
     container_name: pylovo-api-2
     extra_hosts:
       - "host.docker.internal:host-gateway"
     env_file:
-      - .env.docker
+      - ../.env.docker
     volumes:
-      - ./api:/app/api:ro
-      - ./src:/app/src:ro
-      - ./runme:/app/runme:ro
-      - ./datapipeline:/app/datapipeline:ro
-      - ./datapipeline/cache:/app/datapipeline/cache
-      - ./config:/app/config:ro
+      - ../api:/app/api:ro
+      - ../src:/app/src:ro
+      - ../runme:/app/runme:ro
+      - ../datapipeline:/app/datapipeline:ro
+      - ../datapipeline/cache:/app/datapipeline/cache
+      - ../config:/app/config:ro
     environment:
       - HOST=postgres
       - PORT=5432
@@ -163,19 +167,21 @@ services:
 
   # PyLovo API Instance 3
   pylovo-api-3:
-    build: .
+    build:
+      context: ..
+      dockerfile: environment/Dockerfile
     container_name: pylovo-api-3
     extra_hosts:
       - "host.docker.internal:host-gateway"
     env_file:
-      - .env.docker
+      - ../.env.docker
     volumes:
-      - ./api:/app/api:ro
-      - ./src:/app/src:ro
-      - ./runme:/app/runme:ro
-      - ./datapipeline:/app/datapipeline:ro
-      - ./datapipeline/cache:/app/datapipeline/cache
-      - ./config:/app/config:ro
+      - ../api:/app/api:ro
+      - ../src:/app/src:ro
+      - ../runme:/app/runme:ro
+      - ../datapipeline:/app/datapipeline:ro
+      - ../datapipeline/cache:/app/datapipeline/cache
+      - ../config:/app/config:ro
     environment:
       - HOST=postgres
       - PORT=5432
