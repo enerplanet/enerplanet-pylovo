@@ -62,10 +62,10 @@ If you have direct write access, clone the main repository instead.
 
 ### 2) Create a branch for your change
 
-Create a dedicated branch for your bugfix, feature, or documentation update:
+Create a dedicated branch from `dev` for your bugfix, feature, or documentation update:
 
 ```bash
-git checkout -b type/short-description
+git checkout -b type/short-description origin/dev
 ```
 
 Examples:
@@ -106,7 +106,7 @@ git push -u origin <your-branch-name>
 
 ### 7) Open a pull request
 
-Create a pull request against the appropriate branch (usually `main` unless the project uses a different workflow).
+Create a pull request against `dev`. `dev` is the integration branch used for test deployment; `main` receives only releases, merged from `dev`.
 
 In your pull request description, include:
 
