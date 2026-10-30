@@ -940,8 +940,8 @@ async def get_available_regions(
     """
     Get regions that have grid data available in the database.
 
-    Returns the centroid, bounding box and covered-area outline of every region
-    that has generated grids.
+    Returns the centroid, bounding box, covered-area outline and postcodes of
+    every region that has generated grids.
     """
     from src.database.database_client import DatabaseClient
     from src.config_loader import VERSION_ID as DEFAULT_VERSION_ID
@@ -965,7 +965,8 @@ async def get_available_regions(
                        AVG(ST_X(ST_Centroid(pr.geom))) as avg_cx,
                        AVG(ST_Y(ST_Centroid(pr.geom))) as avg_cy,
                        ST_Extent(pr.geom) as bbox_3035,
-                       ST_UnaryUnion(ST_Collect(pr.geom)) as covered_3035
+                       ST_UnaryUnion(ST_Collect(pr.geom)) as covered_3035,
+                       array_agg(pr.postcode_result_plz ORDER BY pr.postcode_result_plz) as postcodes
                 FROM postcode_result pr
                 JOIN gc ON gc.plz = pr.postcode_result_plz
                     AND gc.country_code = pr.country_code
@@ -998,6 +999,7 @@ async def get_available_regions(
                        ST_Transform(ST_SetSRID(ST_MakePoint(a.avg_cx, a.avg_cy), 3035), 4326) as centroid,
                        ST_Transform(ST_SetSRID(a.bbox_3035::geometry, 3035), 4326) as bbox,
                        ST_Transform(a.covered_3035, 4326) as covered,
+                       a.postcodes,
                        COALESCE(s.state_name, a.state_code) as state_name,
                        c.country_name,
                        s.osm_relation_id,
@@ -1020,7 +1022,8 @@ async def get_available_regions(
                    country_name,
                    osm_relation_id,
                    has_3d,
-                   ST_AsGeoJSON(covered) as covered_geojson
+                   ST_AsGeoJSON(covered) as covered_geojson,
+                   postcodes
             FROM transformed
             ORDER BY country_code, state_code
         """, (target_version, target_version, target_version))
@@ -1039,7 +1042,8 @@ async def get_available_regions(
         for row in rows:
             (country_code, state_code, grid_count, centroid_lon, centroid_lat,
              bbox_west, bbox_south, bbox_east, bbox_north,
-             state_name, country_name, osm_relation_id, has_3d, covered_geojson) = row
+             state_name, country_name, osm_relation_id, has_3d, covered_geojson,
+             postcodes) = row
             if centroid_lat is None or centroid_lon is None:
                 continue
 
@@ -1050,6 +1054,7 @@ async def get_available_regions(
                 "country_code": cc,
                 "state_code": state_code,
                 "grid_count": grid_count,
+                "postcodes": postcodes or [],
                 "centroid": {"lat": centroid_lat, "lon": centroid_lon},
                 "bbox": {
                     "west": bbox_west,
