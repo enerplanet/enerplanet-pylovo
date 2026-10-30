@@ -37,7 +37,7 @@ The production deployment uses a scalable architecture designed to handle
     ┌───────────────────┐ ┌───────────────────┐ ┌───────────────────┐
     │   PyLovo API 1    │ │   PyLovo API 2    │ │   PyLovo API 3    │
     │   (4 workers)     │ │   (4 workers)     │ │   (4 workers)     │
-    │   WORKER_ID=1     │ │   WORKER_ID=2     │ │   WORKER_ID=3     │
+    │  pylovo-api-1     │ │  pylovo-api-2     │ │  pylovo-api-3     │
     └───────────────────┘ └───────────────────┘ └───────────────────┘
                     │               │               │
                     └───────────────┼───────────────┘
@@ -123,9 +123,10 @@ and provides health monitoring.
         option httpchk GET /health
         http-check expect status 200
         
-        server api1 pylovo-api-1:8086 check inter 5s fall 3 rise 2
-        server api2 pylovo-api-2:8086 check inter 5s fall 3 rise 2
-        server api3 pylovo-api-3:8086 check inter 5s fall 3 rise 2
+        server-template api 3 pylovo-api-pool:8086 check resolvers docker init-addr none
+
+    resolvers docker
+        nameserver dns 127.0.0.11:53
 
     frontend stats
         bind *:8404
@@ -178,7 +179,7 @@ PyLovo API Workers
 Each API container runs Uvicorn with 4 workers:
 
 - Connection pooling: 1-2 database connections per worker
-- Unique ``WORKER_ID`` for logging and debugging
+- Worker identifier in logs and ``/health``: ``WORKER_ID`` if set, otherwise the container hostname
 - Automatic restart on failure (``restart: unless-stopped``)
 
 **Environment Variables:**
@@ -204,7 +205,7 @@ Each API container runs Uvicorn with 4 workers:
    * - REDIS_PORT
      - Redis port (default: 6379)
    * - WORKER_ID
-     - Unique worker identifier (1, 2, 3, ...)
+     - Optional worker identifier for logs and ``/health``; defaults to the container hostname
 
 
 Docker Compose Files
@@ -215,83 +216,82 @@ PyLovo provides two Docker Compose configurations:
 Production (environment/docker-compose.yml)
 -------------------------------------------
 
-Full production stack with 3 API instances, HAProxy, and Redis:
+Full production stack with 3 API replicas, HAProxy, Redis and PostgreSQL. The
+project is named ``pylovo``, so containers are ``pylovo-<service>-<n>``
+(``pylovo-proxy-1``, ``pylovo-api-1`` to ``pylovo-api-3``, ``pylovo-redis-1``,
+``pylovo-postgres-1``). Other services on ``spatialhub-net`` address the proxy
+by the alias ``pylovo``.
 
 .. code-block:: yaml
 
+    name: pylovo
+
     services:
-      # HAProxy Load Balancer
-      haproxy:
+      proxy:
         image: haproxy:2.9-alpine
-        container_name: pylovo-haproxy
         ports:
           - "8086:80"      # API endpoint
           - "8404:8404"    # Stats dashboard
         volumes:
-          - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+          - ../haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
         depends_on:
-          - pylovo-api-1
-          - pylovo-api-2
-          - pylovo-api-3
-        restart: unless-stopped
+          - api
+        networks:
+          default:
+          spatialhub-net:
+            aliases:
+              - pylovo
 
-      # Redis Cache (shared across all workers)
       redis:
         image: redis:7-alpine
-        container_name: pylovo-redis
         command: redis-server --maxmemory 1gb --maxmemory-policy allkeys-lru
-        restart: unless-stopped
 
-      # PyLovo API Instance 1
-      pylovo-api-1:
-        build: .
-        container_name: pylovo-api-1
+      postgres:
+        image: pgrouting/pgrouting:17-3.5-3.7.3
+        # ...
+
+      api:
+        build:
+          context: ..
+          dockerfile: environment/Dockerfile
+        deploy:
+          replicas: 3
+        networks:
+          default:
+            aliases:
+              - pylovo-api-pool   # resolved by the proxy
         environment:
-          - HOST=host.docker.internal
-          - PORT=5433
-          - DBNAME=pylovo_db
-          - DBUSER=postgres
-          - PASSWORD=postgres
+          - HOST=postgres
           - REDIS_HOST=redis
-          - REDIS_PORT=6379
-          - WORKER_ID=1
-        extra_hosts:
-          - "host.docker.internal:host-gateway"
-        depends_on:
-          - redis
-        restart: unless-stopped
+          # ...
         command: ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8086", "--workers", "4"]
-
-      # Additional workers (pylovo-api-2, pylovo-api-3) follow same pattern
 
 Development (environment/docker-compose.dev.yml)
 ------------------------------------------------
 
-Single instance with hot reload for development:
+Single API container on ``spatialhub-net``, reusing the EnerPlanET PostgreSQL
+and Redis. The container is ``pylovo-api-1``; other services address it by the
+alias ``pylovo``.
 
 .. code-block:: yaml
 
+    name: pylovo
+
     services:
-      haproxy:
-        image: haproxy:2.9-alpine
-        container_name: pylovo-haproxy-dev
+      api:
+        build:
+          context: ..
+          dockerfile: environment/Dockerfile
         ports:
-          - "8086:80"
-          - "8404:8404"
+          - "8086:8086"
         volumes:
-          - ./haproxy/haproxy.dev.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
-
-      redis:
-        image: redis:7-alpine
-        command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru
-
-      pylovo-api-dev:
-        build: .
-        container_name: pylovo-api-dev
-        volumes:
-          - ./api:/app/api          # Hot reload
-          - ./src:/app/src          # Hot reload
-        command: ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8086", "--reload"]
+          - ../api:/app/api:ro
+          - ../src:/app/src:ro
+          # ...
+        networks:
+          spatialhub-net:
+            aliases:
+              - pylovo
 
 
 Deployment Instructions
@@ -368,10 +368,10 @@ Scaling Workers
 
 To add more workers, edit ``environment/docker-compose.yml``:
 
-1. Copy an existing ``pylovo-api-*`` service definition
-2. Update ``container_name`` and ``WORKER_ID`` to unique values
-3. Add new server to ``haproxy/haproxy.cfg`` backend
-4. Restart the stack:
+1. Raise ``deploy.replicas`` on the ``api`` service
+2. Raise the slot count of ``server-template api`` in ``haproxy/haproxy.cfg``
+   to at least the replica count
+3. Restart the stack:
 
 .. code-block:: bash
 
@@ -405,7 +405,7 @@ Response:
 
     {
         "status": "healthy",
-        "worker": "1",
+        "worker": "<WORKER_ID or container hostname>",
         "database": "connected",
         "version": "1.0.0"
     }
@@ -422,7 +422,7 @@ Container Logs
     docker logs pylovo-api-1 --tail 100
 
     # HAProxy access logs
-    docker logs pylovo-haproxy --tail 100
+    docker logs pylovo-proxy-1 --tail 100
 
 
 Troubleshooting
@@ -459,7 +459,7 @@ The API will fall back to in-memory caching. To fix:
 .. code-block:: bash
 
     # Check Redis is running
-    docker exec pylovo-redis redis-cli ping
+    docker exec pylovo-redis-1 redis-cli ping
     # Should return: PONG
 
 **All backends marked as DOWN in HAProxy:**
@@ -482,8 +482,8 @@ The API will fall back to in-memory caching. To fix:
     # View crash logs
     docker logs pylovo-api-1
 
-    # Restart specific worker
-    docker compose restart pylovo-api-1
+    # Restart one replica
+    docker restart pylovo-api-1
 
 
 Performance Tuning
