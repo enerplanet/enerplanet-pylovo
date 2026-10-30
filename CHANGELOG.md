@@ -223,6 +223,19 @@ All clustering/sampling/utility modules modified relative to upstream:
 - Removed: `altdss>=0.2.0`, `pyproj==3.6.1`.
 - Added: see "Dependencies added" above.
 
+#### Compose services named by role
+- Both compose files pin the project to `pylovo` and set no
+  `container_name`. The dev API service is `api` (container
+  `pylovo-api-1`), reachable on `spatialhub-net` as `pylovo` and,
+  until callers move, `pylovo-api-dev`.
+- Production runs one `api` service with `deploy.replicas: 3`; the
+  containers keep the names `pylovo-api-1..3`. HAProxy is the `proxy`
+  service (aliases `pylovo`, `pylovo-haproxy`) and finds the replicas
+  through Docker DNS on the alias `pylovo-api-pool`.
+- `WORKER_ID` is no longer set per replica; the API logs the container
+  hostname when it is absent. The Postgres container is
+  `pylovo-postgres-1`.
+
 ### Removed (relative to upstream)
 
 - Top-level project metadata files: `pyproject.toml`, `uv.lock`,
