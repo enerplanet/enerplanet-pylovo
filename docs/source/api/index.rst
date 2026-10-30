@@ -14,7 +14,7 @@ Getting Started
 Running the API Server
 ----------------------
 
-The API runs inside Docker via ``docker-compose.yml``:
+The API runs inside Docker via ``environment/docker-compose.yml``:
 
 .. code-block:: bash
 

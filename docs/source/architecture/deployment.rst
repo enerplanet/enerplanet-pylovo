@@ -212,8 +212,8 @@ Docker Compose Files
 
 PyLovo provides two Docker Compose configurations:
 
-Production (docker-compose.yml)
--------------------------------
+Production (environment/docker-compose.yml)
+-------------------------------------------
 
 Full production stack with 3 API instances, HAProxy, and Redis:
 
@@ -264,8 +264,8 @@ Full production stack with 3 API instances, HAProxy, and Redis:
 
       # Additional workers (pylovo-api-2, pylovo-api-3) follow same pattern
 
-Development (docker-compose.dev.yml)
-------------------------------------
+Development (environment/docker-compose.dev.yml)
+------------------------------------------------
 
 Single instance with hot reload for development:
 
@@ -312,7 +312,7 @@ Quick Start
 .. code-block:: bash
 
     make dev
-    # or: docker compose -f docker-compose.dev.yml up -d
+    # or: docker compose -f environment/docker-compose.dev.yml up -d
 
 **Production (3 instances + HAProxy):**
 
@@ -366,7 +366,7 @@ Access Points
 Scaling Workers
 ---------------
 
-To add more workers, edit ``docker-compose.yml``:
+To add more workers, edit ``environment/docker-compose.yml``:
 
 1. Copy an existing ``pylovo-api-*`` service definition
 2. Update ``container_name`` and ``WORKER_ID`` to unique values
@@ -510,7 +510,7 @@ Adding More Containers
 
 For high-traffic deployments:
 
-1. Add ``pylovo-api-4``, ``pylovo-api-5``, etc. to ``docker-compose.yml``
+1. Add ``pylovo-api-4``, ``pylovo-api-5``, etc. to ``environment/docker-compose.yml``
 2. Add corresponding servers to ``haproxy/haproxy.cfg``
 3. Monitor database connection limits
 

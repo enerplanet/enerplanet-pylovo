@@ -23,8 +23,8 @@ CONTAINER_NAME_PROD := pylovo-api-1
 
 #   make <target> CONTAINER_NAME=pylovo-api-dev PGROUTING_CONTAINER=postgres
 CONTAINER_NAME ?= $(CONTAINER_NAME_PROD)
-COMPOSE_FILE_DEV := docker-compose.dev.yml
-COMPOSE_FILE_PROD := docker-compose.yml
+COMPOSE_FILE_DEV := environment/docker-compose.dev.yml
+COMPOSE_FILE_PROD := environment/docker-compose.yml
 RAW_DATA_DIR := raw_data
 RAW_DATA_ARCHIVE := raw_data.7z
 DUMP_DIR := initial-data
@@ -104,13 +104,13 @@ create-db:
 ## build: Build Docker container
 build:
 	@echo "> Building Docker container..."
-	docker compose build
+	docker compose -f $(COMPOSE_FILE_PROD) build
 	@echo "[OK] Build complete"
 
 ## rebuild: Force rebuild Docker container (no cache)
 rebuild:
 	@echo "> Rebuilding Docker container (no cache)..."
-	docker compose build --no-cache
+	docker compose -f $(COMPOSE_FILE_PROD) build --no-cache
 	@echo "[OK] Rebuild complete"
 
 # =============================================================================
@@ -351,7 +351,7 @@ reset-full-db: drop-db load-full-db
 ## clean: Remove container and images
 clean:
 	@echo "> Cleaning up..."
-	docker compose down --rmi local -v 2>/dev/null || true
+	docker compose -f $(COMPOSE_FILE_PROD) down --rmi local -v 2>/dev/null || true
 	@echo "[OK] Cleanup complete"
 
 # =============================================================================
