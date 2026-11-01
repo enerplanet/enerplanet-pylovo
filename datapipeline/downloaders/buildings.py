@@ -814,6 +814,8 @@ class BuildingDownloader(BaseDownloader):
         """Process residential buildings and save to lossless GPKG."""
         import re
 
+        import pandas as pd
+
         logger.info(f"Processing {len(gdf)} residential buildings...")
 
         # Use osm_way_id if osm_id is null
@@ -843,9 +845,10 @@ class BuildingDownloader(BaseDownloader):
                 match = re.search(r'"building:levels"=>"(\d+)"', other_tags)
                 if match:
                     return int(match.group(1))
-            return 1
+            return None
 
-        gdf['Floors'] = gdf['other_tags'].apply(extract_floors) if 'other_tags' in gdf.columns else 1
+        # Left empty without a building:levels tag so enrichment can fill it.
+        gdf['Floors'] = gdf['other_tags'].apply(extract_floors) if 'other_tags' in gdf.columns else None
 
         # Estimate occupants
         _res_low_density_types = {'house', 'detached', 'bungalow', 'cabin', 'hut', 'farm', 'farmhouse', 'static_caravan', 'yes'}
@@ -856,7 +859,8 @@ class BuildingDownloader(BaseDownloader):
         def estimate_occupants(row):
             area = row['Area']
             b_type = row['Building_T']
-            floors = row['Floors']
+            # Households are estimated with one floor where OSM has no level count.
+            floors = row['Floors'] if pd.notna(row['Floors']) else 1
             if b_type in _res_low_density_types:
                 return max(1, int(area * floors / 50))
             elif b_type in _res_semi_dense_types:
