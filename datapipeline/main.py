@@ -146,33 +146,22 @@ class DataPipeline:
 
     def _clear_enrichment_cache(self):
         """Clear enrichment cache directories (3dbag, ep_online, cbs, eubucco) to free disk space.
-        
-        For eubucco, keeps small state-level caches (e.g. DE__bremen.gpkg)
-        and only removes the large country-level files to avoid re-downloading.
+
+        For eubucco, keeps the version subdirectory (e.g. v0.2/, holding the
+        NUTS region GeoPackages and outlines) and removes only top-level files.
         """
         cache_base = Path(__file__).parent / "cache"
         for cache_name in ("3dbag", "ep_online", "cbs", "eubucco"):
             cache_dir = cache_base / cache_name
             if cache_dir.exists():
                 if cache_name == "eubucco":
-                    # Only remove large country-level files; keep state caches
                     removed_mb = 0
-                    kept_files = []
                     for f in list(cache_dir.iterdir()):
-                        if not f.is_file():
-                            continue
-                        # State caches contain "__" (e.g. DE__bremen.gpkg)
-                        if "__" in f.name:
-                            kept_files.append(f.name)
-                            continue
-                        size_mb = f.stat().st_size / (1024 * 1024)
-                        f.unlink()
-                        removed_mb += size_mb
+                        if f.is_file():
+                            removed_mb += f.stat().st_size / (1024 * 1024)
+                            f.unlink()
                     if removed_mb > 0:
-                        logger.info(
-                            "Cleared eubucco country files (%.0f MB); kept %d state cache(s): %s",
-                            removed_mb, len(kept_files), ", ".join(kept_files) or "none",
-                        )
+                        logger.info("Cleared eubucco top-level files (%.0f MB); kept NUTS region files", removed_mb)
                 else:
                     size_mb = sum(f.stat().st_size for f in cache_dir.rglob("*") if f.is_file()) / (1024 * 1024)
                     if size_mb > 0:
