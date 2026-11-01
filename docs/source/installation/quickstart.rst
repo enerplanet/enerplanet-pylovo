@@ -68,7 +68,7 @@ This runs the following steps automatically:
 1. Pulls Git LFS files (raw_data.7z)
 2. Creates ``pylovo_db`` database in PostgreSQL
 3. Builds the Docker image (extracts raw_data.7z)
-4. Starts all services (nginx, redis, 3 API workers)
+4. Starts all services (HAProxy, Redis, PostgreSQL, 3 API replicas)
 
 Verify Installation
 -------------------
@@ -76,15 +76,16 @@ Verify Installation
 .. code-block:: bash
 
     # Check all containers are running
-    make status
-    
+    docker compose -f environment/docker-compose.yml ps --format "table {{.Name}}\t{{.Status}}"
+
     # Expected output:
-    # NAMES              STATUS
-    # pylovo-nginx       Up
-    # pylovo-api-1       Up
-    # pylovo-api-2       Up
-    # pylovo-api-3       Up
-    # pylovo-redis       Up
+    # NAME                STATUS
+    # pylovo-api-1        Up
+    # pylovo-api-2        Up
+    # pylovo-api-3        Up
+    # pylovo-postgres-1   Up (healthy)
+    # pylovo-proxy-1      Up
+    # pylovo-redis-1      Up
 
     # Test health endpoint
     curl http://localhost:8086/health
@@ -593,7 +594,7 @@ Container Won't Start
 .. code-block:: bash
 
     # Check container logs
-    docker compose logs pylovo-api-1
+    docker logs pylovo-api-1
 
     # Rebuild without cache
     docker compose build --no-cache

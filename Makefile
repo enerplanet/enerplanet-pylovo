@@ -21,7 +21,8 @@
 # Variables
 CONTAINER_NAME_PROD := pylovo-api-1
 
-#   make <target> CONTAINER_NAME=pylovo-api-dev PGROUTING_CONTAINER=postgres
+# Both compose files run project pylovo, service api, so the first api
+# container is pylovo-api-1 in dev and prod.
 CONTAINER_NAME ?= $(CONTAINER_NAME_PROD)
 COMPOSE_FILE_DEV := environment/docker-compose.dev.yml
 COMPOSE_FILE_PROD := environment/docker-compose.yml
@@ -300,7 +301,7 @@ load-state:
 		exit 1; \
 	fi
 	@echo "> Loading $(STATE_EFFECTIVE) data into pylovo_db..."
-	gunzip -c $(DUMP_DIR)/$(STATE_EFFECTIVE).sql.gz | docker exec -i pylovo-postgres psql -U postgres -d pylovo_db -q
+	gunzip -c $(DUMP_DIR)/$(STATE_EFFECTIVE).sql.gz | docker exec -i pylovo-postgres-1 psql -U postgres -d pylovo_db -q
 	@echo "[OK] $(STATE_EFFECTIVE) data loaded"
 
 ## dump-full-db: Dump the complete pylovo_db to raw_data/

@@ -1,33 +1,38 @@
+# Pinned because volume and network names are built from it, and it is the
+# unit `down --remove-orphans` acts on.
+name: pylovo
+
 services:
-  # HAProxy Load Balancer (replaces nginx)
-  haproxy:
+  # HAProxy load balancer in front of the api replicas
+  proxy:
     image: haproxy:2.9-alpine
-    container_name: pylovo-haproxy
     ports:
       - "8086:80"
       - "8404:8404"  # Stats dashboard
     volumes:
       - ../haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
     depends_on:
-      - pylovo-api-1
-      - pylovo-api-2
-      - pylovo-api-3
+      - api
     restart: unless-stopped
     networks:
-      - default
-      - spatialhub-net
+      default:
+      spatialhub-net:
+        # Callers address the alias; `api` is shared by other repositories on
+        # the network and is never an address. pylovo-haproxy stays until
+        # callers move to pylovo.
+        aliases:
+          - pylovo
+          - pylovo-haproxy
 
   # Redis Cache (shared across all workers)
   redis:
     image: redis:7-alpine
-    container_name: pylovo-redis
     command: redis-server --maxmemory 1gb --maxmemory-policy allkeys-lru
     restart: unless-stopped
 
   # PostgreSQL with PostGIS + pgRouting
   postgres:
     image: pgrouting/pgrouting:17-3.5-3.7.3
-    container_name: pylovo-postgres
     shm_size: 8g
     ports:
       - "${PYLOVO_POSTGRES_PORT:-5434}:5432"
@@ -94,12 +99,19 @@ services:
       timeout: 5s
       retries: 5
 
-  # PyLovo API Instance 1
-  pylovo-api-1:
+  # PyLovo API replicas, discovered by the proxy through Docker DNS
+  api:
     build:
       context: ..
       dockerfile: environment/Dockerfile
-    container_name: pylovo-api-1
+    deploy:
+      replicas: 3
+    networks:
+      default:
+        # The proxy resolves this alias; `api` would also match other
+        # repositories' services on spatialhub-net, which the proxy joins.
+        aliases:
+          - pylovo-api-pool
     extra_hosts:
       - "host.docker.internal:host-gateway"
     env_file:
@@ -121,77 +133,6 @@ services:
       - TARGET_SCHEMA=public
       - REDIS_HOST=redis
       - REDIS_PORT=6379
-      - WORKER_ID=1
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_started
-    restart: unless-stopped
-    command: ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8086", "--workers", "4"]
-
-  # PyLovo API Instance 2
-  pylovo-api-2:
-    build:
-      context: ..
-      dockerfile: environment/Dockerfile
-    container_name: pylovo-api-2
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    env_file:
-      - ../.env.docker
-    volumes:
-      - ../api:/app/api:ro
-      - ../src:/app/src:ro
-      - ../runme:/app/runme:ro
-      - ../datapipeline:/app/datapipeline:ro
-      - ../datapipeline/cache:/app/datapipeline/cache
-      - ../config:/app/config:ro
-    environment:
-      - HOST=postgres
-      - PORT=5432
-      - DBNAME=pylovo_db
-      - DBUSER=postgres
-      - PASSWORD=postgres
-      - TARGET_SCHEMA=public
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - WORKER_ID=2
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_started
-    restart: unless-stopped
-    command: ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8086", "--workers", "4"]
-
-  # PyLovo API Instance 3
-  pylovo-api-3:
-    build:
-      context: ..
-      dockerfile: environment/Dockerfile
-    container_name: pylovo-api-3
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    env_file:
-      - ../.env.docker
-    volumes:
-      - ../api:/app/api:ro
-      - ../src:/app/src:ro
-      - ../runme:/app/runme:ro
-      - ../datapipeline:/app/datapipeline:ro
-      - ../datapipeline/cache:/app/datapipeline/cache
-      - ../config:/app/config:ro
-    environment:
-      - HOST=postgres
-      - PORT=5432
-      - DBNAME=pylovo_db
-      - DBUSER=postgres
-      - PASSWORD=postgres
-      - TARGET_SCHEMA=public
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - WORKER_ID=3
     depends_on:
       postgres:
         condition: service_healthy

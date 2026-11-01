@@ -1,11 +1,14 @@
+# Pinned because volume and network names are built from it, and it is the
+# unit `down --remove-orphans` acts on.
+name: pylovo
+
 services:
   # Single PyLovo API (no HAProxy for local dev)
   # Reuses postgres + redis from enerplanet (spatialhub-net)
-  pylovo-api:
+  api:
     build:
       context: ..
       dockerfile: environment/Dockerfile
-    container_name: pylovo-api-dev
     ports:
       - "8086:8086"
     extra_hosts:
@@ -33,8 +36,12 @@ services:
     restart: unless-stopped
     networks:
       spatialhub-net:
+        # Callers address the alias; `api` is shared by other repositories on
+        # the network and is never an address. pylovo-api-dev stays until callers
+        # move to pylovo.
         aliases:
           - pylovo
+          - pylovo-api-dev
     command: ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8086", "--workers", "4"]
 
 networks:

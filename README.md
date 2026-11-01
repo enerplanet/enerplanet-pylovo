@@ -68,7 +68,7 @@ equipment dimensioning.
                                       │
                     ┌─────────────────┼─────────────────┐
                     ▼                 ▼                 ▼
-              pylovo-api-1      pylovo-api-2      pylovo-api-3   (FastAPI)
+              pylovo-api-1      pylovo-api-2      pylovo-api-3   (FastAPI, service api)
                     └─────────────────┼─────────────────┘
                                       │
                   ┌───────────────────┼───────────────────┐

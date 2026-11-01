@@ -1,5 +1,6 @@
 import sys
 import os
+import socket
 from importlib.metadata import version
 from pathlib import Path
 # Add project root and api directory to python path
@@ -59,7 +60,7 @@ async def startup_event():
     with DatabaseClient() as dbc:
         grid.ensure_runtime_schema(dbc)
     cache.init_redis()
-    worker_id = os.environ.get('WORKER_ID', '?')
+    worker_id = os.environ.get('WORKER_ID') or socket.gethostname()
     print(f"[Startup] PyLovo API worker {worker_id} ready with connection pooling and Redis cache")
 
 @app.on_event("shutdown")
@@ -72,7 +73,7 @@ async def shutdown_event():
 @app.get("/health")
 async def health_check():
     """Health check endpoint — must never fail so HAProxy keeps backend in rotation."""
-    worker_id = os.environ.get('WORKER_ID', '?')
+    worker_id = os.environ.get('WORKER_ID') or socket.gethostname()
     try:
         stats = cache.get_stats()
     except Exception:
