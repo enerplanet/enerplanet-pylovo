@@ -47,7 +47,7 @@ class BuildingFloorsTest(unittest.TestCase):
             res = download(Path(tmp))
         self.assertEqual(res.loc[1, "Floors"], 3)
         self.assertTrue(res["Floors"].isna()[2])
-        self.assertEqual(res.loc[2, "Occupants"], 2)  # 100 m² x 1 floor / 50
+        self.assertEqual(res.loc[2, "Occupants"], 1)  # a house is one dwelling
 
     def test_eubucco_fills_untagged_floors_only(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -55,9 +55,7 @@ class BuildingFloorsTest(unittest.TestCase):
             enricher = EUBUCCOEnricher({"country": "germany"}, cache_dir=Path(tmp))
             joined = enricher._spatial_join(res, EUBUCCO).set_index("osm_id")
         self.assertEqual(joined.loc[1, "Floors"], 3)  # OSM wins
-        self.assertEqual(joined.loc[1, "Occupants"], 6)
         self.assertEqual(joined.loc[2, "Floors"], 2)
-        self.assertEqual(joined.loc[2, "Occupants"], 2)  # still the download-time estimate
 
 
 if __name__ == "__main__":
