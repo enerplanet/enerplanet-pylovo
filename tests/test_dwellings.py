@@ -14,6 +14,7 @@ from shapely.geometry import box
 
 from datapipeline.downloaders.buildings import estimate_dwellings
 from datapipeline.main import DataPipeline
+from datapipeline.processors import BuildingProcessor
 
 
 class EstimateDwellingsTest(unittest.TestCase):
@@ -55,6 +56,21 @@ class RecountDwellingsTest(unittest.TestCase):
             gdf.to_file(path, driver="GPKG")
             DataPipeline._recount_dwellings(Path(tmp))
             self.assertEqual(gpd.read_file(path)["Occupants"].tolist(), [10, 1, 1])
+
+
+class ProcessedFileDwellingsTest(unittest.TestCase):
+    def test_processed_file_uses_the_dwelling_rule(self):
+        # 200, 300, 400 and 100 m² footprints, none with a level count; the last is not residential.
+        gdf = gpd.GeoDataFrame(
+            {"f_class": ["house", "yes", "apartments", "retail"], "Floors": [None, None, None, None]},
+            geometry=[box(0, 0, 10, 20), box(100, 0, 110, 30), box(200, 0, 210, 40), box(300, 0, 310, 10)],
+            crs="EPSG:3035",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "Res_1.gpkg"
+            gdf.to_file(path, driver="GPKG")
+            out = BuildingProcessor({}).process_shapefile(path)
+            self.assertEqual(gpd.read_file(out)["Occupants"].tolist(), [1, 1, 4, 0])
 
 
 if __name__ == "__main__":
