@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional
 
 import numpy as np
+import shapely
 
 try:
     import geopandas as gpd
@@ -30,6 +31,20 @@ logger = logging.getLogger("datapipeline")
 AREA_THRESHOLD = 60  # m² - remove transformers with area >= this
 MIN_DISTANCE_BETWEEN_TRAFOS = 8  # meters - remove transformers too close together
 VOLTAGE_THRESHOLD = 110000  # Volts - remove high voltage transformers
+
+
+def drop_close_transformers(gdf, min_distance: float):
+    """Drop every transformer whose centroid lies closer than min_distance to a later row's centroid.
+
+    Matches upstream pylovo's upper-triangle distance-matrix rule. Pairs come from the
+    spatial index, because the dense matrix needs n² memory (11 GB for 38,000 transformers).
+    """
+    centroids = np.asarray(gdf.geometry.centroid.values)
+    left, right = shapely.STRtree(centroids).query(centroids, predicate="dwithin", distance=min_distance)
+    later = right > left
+    left, right = left[later], right[later]
+    close = shapely.distance(centroids[left], centroids[right]) < min_distance
+    return gdf.drop(index=gdf.index[np.unique(left[close])])
 
 
 class TransformerProcessor:
@@ -400,32 +415,8 @@ class TransformerProcessor:
             logger.info(f"After step 3 (remove high voltage >= {VOLTAGE_THRESHOLD}V): {len(gdf)}")
         
         # Step 4: Remove transformers within MIN_DISTANCE_BETWEEN_TRAFOS of each other
-        # Original pylovo logic: build distance matrix, remove rows that have ANY neighbor within threshold
         if len(gdf) > 1:
-            # Calculate centroids for distance calculation
-            gdf['centroid'] = gdf.geometry.centroid
-            
-            # Build distance matrix (same approach as original pylovo)
-            distance_matrix = gdf['centroid'].apply(lambda c: gdf['centroid'].distance(c))
-            
-            # Set lower triangle of matrix to nan (avoid double-counting pairs)
-            distance_matrix = distance_matrix.where(np.triu(np.ones(distance_matrix.shape)).astype(bool))
-            
-            # Set diagonal to nan (distance to self)
-            np.fill_diagonal(distance_matrix.values, float('nan'))
-            
-            # Find rows that have ANY neighbor within threshold
-            # This matches original: distance_matrix[(distance_matrix < MIN_DISTANCE_BETWEEN_TRAFOS).any(axis=1)]
-            rows_with_close_neighbors = distance_matrix[(distance_matrix < MIN_DISTANCE_BETWEEN_TRAFOS).any(axis=1)]
-            indices_to_remove = list(rows_with_close_neighbors.index)
-            
-            if indices_to_remove:
-                gdf = gdf.drop(index=indices_to_remove)
-            
-            # Clean up temporary column
-            if 'centroid' in gdf.columns:
-                gdf = gdf.drop(columns=['centroid'])
-                
+            gdf = drop_close_transformers(gdf, MIN_DISTANCE_BETWEEN_TRAFOS)
             logger.info(f"After step 4 (remove within {MIN_DISTANCE_BETWEEN_TRAFOS}m): {len(gdf)}")
         
         # Step 5: Remove transformers inside shopping areas (optional)
