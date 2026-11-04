@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional
 
 from ..building_constants import NO_ELECTRICITY_BUILDING_TYPES
+from ..downloaders.buildings import estimate_dwellings
 
 try:
     import geopandas as gpd
@@ -393,7 +394,9 @@ class BuildingProcessor:
         
         # Get levels if available
         levels_col = 'levels' if 'levels' in gdf.columns else ('Floors' if 'Floors' in gdf.columns else None)
-        
+        levels = pd.to_numeric(gdf[levels_col], errors='coerce') if levels_col else pd.Series(float('nan'), index=gdf.index)
+        levels = levels.where(levels > 0)
+
         # Populate 'Floors' explicitly (vectorized, capitalized to match pylovo!)
         gdf['Floors'] = 2  # default
         gdf.loc[gdf[f_class_col].isin(['apartments', 'dormitory']), 'Floors'] = 4
@@ -404,22 +407,12 @@ class BuildingProcessor:
             valid_mask = has_levels.notna() & (has_levels > 0)
             gdf.loc[valid_mask, 'Floors'] = has_levels[valid_mask].astype(int)
 
-        # Occupants (vectorized household estimation)
-        AVG_HOUSEHOLD_AREA = 90
-        residential_and_generic = self.RESIDENTIAL_TYPES | self.GENERIC_TYPES
-        is_res = gdf[f_class_col].isin(residential_and_generic)
-        # Estimate floors for household calc (may differ from display Floors for some types)
-        hh_floors = gdf['Floors'].astype(float)
-        # For rows without explicit levels, use 1.5 for single-family types
-        if levels_col:
-            no_explicit = ~(pd.to_numeric(gdf[levels_col], errors='coerce').notna())
-        else:
-            no_explicit = pd.Series(True, index=gdf.index)
-        single_family = gdf[f_class_col].isin({'house', 'detached', 'bungalow'})
-        hh_floors = hh_floors.copy()
-        hh_floors.loc[no_explicit & single_family] = 1.5
-        total_area = gdf['Area'] * hh_floors
-        gdf['Occupants'] = (total_area / AVG_HOUSEHOLD_AREA).clip(lower=1).astype(int)
+        # Dwellings by the download step's rule. Floors above carries type defaults, so only
+        # explicit levels are passed; the EUBUCCO type is not known yet at this stage.
+        gdf['Occupants'] = [
+            estimate_dwellings(t, a, f) for t, a, f in zip(gdf['Building_T'], gdf['Area'], levels)
+        ]
+        is_res = gdf[f_class_col].isin(self.RESIDENTIAL_TYPES | self.GENERIC_TYPES)
         gdf.loc[~is_res, 'Occupants'] = 0
         
         # Calculate centroid for point representation
