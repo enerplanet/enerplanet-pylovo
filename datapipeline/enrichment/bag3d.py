@@ -29,7 +29,7 @@ logger = logging.getLogger("datapipeline")
 
 # 3D BAG data version and base URL
 BAG3D_BASE_URL = "https://data.3dbag.nl"
-BAG3D_VERSION = "v20240420"
+BAG3D_VERSION = "v20250903"
 BAG3D_TILE_INDEX_URL = f"{BAG3D_BASE_URL}/{BAG3D_VERSION}/tile_index.fgb"
 BAG3D_API_URL = "https://api.3dbag.nl"
 
@@ -149,7 +149,7 @@ class BAG3DEnricher:
         """Download and cache the 3D BAG tile index."""
         import geopandas as gpd
 
-        tile_index_path = self.cache_dir / "tile_index.fgb"
+        tile_index_path = self.cache_dir / f"tile_index_{BAG3D_VERSION}.fgb"
 
         if not tile_index_path.exists():
             logger.info("Downloading 3D BAG tile index...")
@@ -223,7 +223,7 @@ class BAG3DEnricher:
         if gpkg_url:
             tile_url = gpkg_url
         else:
-            tile_url = f"{BAG3D_BASE_URL}/{BAG3D_VERSION}/tiles/{tile_id}/{safe_tile_id}.gpkg"
+            tile_url = f"{BAG3D_BASE_URL}/{BAG3D_VERSION}/tiles/{tile_id}/{safe_tile_id}.gpkg.gz"
         logger.info(f"Downloading 3D BAG tile: {tile_id}")
 
         zip_path = self.cache_dir / f"{safe_tile_id}.gpkg.zip"

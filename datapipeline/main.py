@@ -128,6 +128,29 @@ class DataPipeline:
         
         logger.info(f"Initialized pipeline for: {self.region_config['name']}")
     
+    @staticmethod
+    def _drop_excluded_buildings(buildings_dir: Path) -> None:
+        """Remove buildings the processor excluded (under 25 m², no electricity use) from enrichment outputs.
+
+        Enrichment reads the unprocessed Res_/Oth_ files, and the constructor imports its output in
+        preference to the _processed file, so without this the exclusions are lost.
+        """
+        import geopandas as gpd
+
+        for path in sorted(buildings_dir.glob("*.gpkg")):
+            stem = path.stem
+            cuts = [stem.find(tag) for tag in ("_enriched", "_energy", "_cbs") if tag in stem]
+            if "_processed" in stem or not stem.startswith(("Res_", "Oth_")) or not cuts:
+                continue
+            processed = buildings_dir / f"{stem[:min(cuts)]}_processed.gpkg"
+            if not processed.exists():
+                continue
+            gdf = gpd.read_file(path)
+            kept = gdf[gdf["osm_id"].isin(gpd.read_file(processed)["osm_id"])]
+            if len(kept) < len(gdf):
+                kept.to_file(path, driver="GPKG")
+                logger.info("Dropped %d buildings excluded by processing from %s", len(gdf) - len(kept), path.name)
+
     def _clear_cache(self):
         """Clear cached inputs and generated raw_data outputs for this region."""
         cache_path = get_pbf_cache_path(self.region_config)
@@ -431,6 +454,7 @@ class DataPipeline:
                 len(gpkg_files),
                 self._format_duration(time.monotonic() - combined_start_ts),
             )
+            self._drop_excluded_buildings(buildings_dir)
             return buildings_dir
 
         total_gpkg_files = len(gpkg_files)
@@ -505,6 +529,7 @@ class DataPipeline:
             total_gpkg_files,
             self._format_duration(time.monotonic() - enrichment_start_ts),
         )
+        self._drop_excluded_buildings(buildings_dir)
         return buildings_dir
     
     def download_all(self,
