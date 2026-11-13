@@ -9,7 +9,10 @@ they create, generate and delete sites. Run from the project root:
     python -m unittest tests.test_site_mode -v
 """
 import json
+import threading
+import time
 import unittest
+from unittest import mock
 
 import psycopg2
 
@@ -17,7 +20,7 @@ from config.config_table_structure import CREATE_QUERIES, SITE_TABLES
 from src import utils
 from src.config_loader import CONSUMER_CATEGORIES, DBNAME, DBUSER, HOST, PASSWORD, PORT, TARGET_SCHEMA
 from src.database.database_client import DatabaseClient
-from src.site_mode import added_buildings, buildings, sites, transformers
+from src.site_mode import added_buildings, buildings, jobs, sites, transformers
 from src.site_mode.errors import SiteValidationError
 from src.site_mode.generation import generate_site
 
@@ -213,6 +216,45 @@ class SiteTransformerCostTest(unittest.TestCase):
         self.assertEqual(self._replace(assigned_building_ids=[1, 2]), self.revision + 2)
         moved = {"type": "Point", "coordinates": [8.808, 53.092]}
         self.assertEqual(self._replace(geom=moved), self.revision + 3)
+
+
+class SiteJobHeartbeatTest(unittest.TestCase):
+    """A heartbeat commits each beat, so the job's final status update is never blocked.
+
+    Needs only the country row DE and the site tables:
+    python -m unittest tests.test_site_mode.SiteJobHeartbeatTest -v
+    """
+
+    def setUp(self):
+        self.conn = _connect()
+        self.conn.autocommit = True
+        self.cur = self.conn.cursor()
+        self.cur.execute(
+            """INSERT INTO site (user_id, name, country_code, geom)
+               VALUES ('test', 'heartbeat test', 'DE', ST_Multi(ST_Transform(ST_SetSRID(ST_GeomFromGeoJSON(%s), 4326), 3035)))
+               RETURNING site_id""",
+            (json.dumps(TEST_POLYGON),),
+        )
+        self.site_id = self.cur.fetchone()[0]
+        self.job_id = jobs.queue_job(self.cur, self.site_id)["job_id"]
+
+    def tearDown(self):
+        self.cur.execute("DELETE FROM site WHERE site_id = %s", (self.site_id,))
+        self.conn.close()
+
+    def test_final_update_is_not_blocked_by_the_heartbeat(self):
+        stop = threading.Event()
+        with mock.patch.object(jobs, "HEARTBEAT_SECONDS", 0.05):
+            beat = threading.Thread(target=jobs._heartbeat, args=(self.job_id, {}, stop), daemon=True)
+            beat.start()
+            time.sleep(0.3)
+            try:
+                self.cur.execute("SET lock_timeout = '2s'")
+                self.cur.execute("UPDATE site_job SET status = 'succeeded' WHERE job_id = %s", (self.job_id,))
+            finally:
+                stop.set()
+                beat.join(5)
+        self.assertFalse(beat.is_alive())
 
 
 if __name__ == "__main__":
