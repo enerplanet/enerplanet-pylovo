@@ -74,6 +74,7 @@ from datapipeline.processors import (
     BuildingProcessor,
     TransformerProcessor,
 )
+from datapipeline.enrichment.bag3d import apply_bag_dwellings
 from datapipeline.enrichment import (
     BAG3DEnricher,
     EPOnlineEnricher,
@@ -170,7 +171,10 @@ class DataPipeline:
 
     @staticmethod
     def _recount_dwellings(buildings_dir: Path) -> None:
-        """Recount dwellings in the enriched residential files, now that floors and the EUBUCCO type are final."""
+        """Recount dwellings in the enriched residential files, now that floors and the EUBUCCO type are final.
+
+        Where the 3D BAG enricher counted BAG units, those counts replace the estimate (apply_bag_dwellings).
+        """
         import geopandas as gpd
 
         for path in sorted(buildings_dir.glob("Res_*_enriched*.gpkg")):
@@ -180,6 +184,10 @@ class DataPipeline:
                 estimate_dwellings(t, a, f, e)
                 for t, a, f, e in zip(gdf["Building_T"], gdf["Area"], gdf["Floors"], types)
             ]
+            if "bag_units" in gdf.columns:
+                kept = apply_bag_dwellings(gdf)
+                logger.info("Dropped %d buildings without a BAG unit from %s", len(gdf) - len(kept), path.name)
+                gdf = kept
             gdf.to_file(path, driver="GPKG")
             logger.info("Recounted dwellings in %s: %d", path.name, int(gdf["Occupants"].sum()))
 

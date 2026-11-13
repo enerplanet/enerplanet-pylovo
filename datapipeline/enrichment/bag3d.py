@@ -10,6 +10,7 @@ Provides:
 - Construction year (bouwjaar)
 - BAG identifier (pand ID)
 - 3D geometry (LoD1.2/LoD2.2)
+- BAG units (verblijfsobjecten) inside each footprint, from the PDOK BAG WFS
 
 Data source: https://3dbag.nl
 License: CC-BY-4.0 (attribution required)
@@ -17,6 +18,7 @@ Attribution: 3D BAG by TU Delft 3D geoinformation group
 """
 
 import gzip
+import json
 import logging
 import shutil
 import zipfile
@@ -32,6 +34,40 @@ BAG3D_BASE_URL = "https://data.3dbag.nl"
 BAG3D_VERSION = "v20250903"
 BAG3D_TILE_INDEX_URL = f"{BAG3D_BASE_URL}/{BAG3D_VERSION}/tile_index.fgb"
 BAG3D_API_URL = "https://api.3dbag.nl"
+
+BAG_WFS_URL = "https://service.pdok.nl/lv/bag/wfs/v2_0"
+BAG_WFS_PAGE = 1000  # PDOK serves at most 1000 features per request
+BAG_UNIT_CELL_M = 2000  # edge of one cached WFS request cell in EPSG:28992
+BAG_UNIT_STATUSES_IN_USE = (
+    "Verblijfsobject in gebruik",
+    "Verblijfsobject in gebruik (niet ingemeten)",
+    "Verbouwing verblijfsobject",
+)
+
+
+def count_units_in_footprints(gdf_buildings, units):
+    """Add bag_units and bag_dwellings: BAG units inside each footprint, all and those with woonfunctie."""
+    import geopandas as gpd
+
+    hits = gpd.sjoin(units[["gebruiksdoel", "geometry"]], gdf_buildings[["geometry"]], predicate="within")
+    building = hits["index_right"]
+    is_dwelling = hits["gebruiksdoel"].str.contains("woonfunctie", na=False)
+    gdf = gdf_buildings.copy()
+    gdf["bag_units"] = building.value_counts().reindex(gdf.index, fill_value=0).astype(int)
+    gdf["bag_dwellings"] = is_dwelling.groupby(building).sum().reindex(gdf.index, fill_value=0).astype(int)
+    return gdf
+
+
+def apply_bag_dwellings(gdf):
+    """Take Occupants from BAG where a footprint holds dwellings, and drop footprints holding no BAG unit.
+
+    BAG registers every unit, so a footprint without one is an outbuilding. A footprint with
+    only non-residential units keeps its estimated Occupants.
+    """
+    gdf = gdf.copy()
+    registered = gdf["bag_dwellings"] > 0
+    gdf.loc[registered, "Occupants"] = gdf.loc[registered, "bag_dwellings"]
+    return gdf[gdf["bag_units"] > 0]
 
 
 class BAG3DEnricher:
@@ -109,6 +145,7 @@ class BAG3DEnricher:
 
         # Spatial join: match buildings to 3D BAG footprints
         gdf_enriched = self._spatial_join(gdf_buildings, gdf_3dbag)
+        gdf_enriched = self._add_bag_unit_counts(gdf_enriched)
 
         # Save enriched output
         if output_gpkg.exists():
@@ -457,6 +494,73 @@ class BAG3DEnricher:
                 gdf["height_ground"] = gdf["b3_h_min"]
 
         return gdf
+
+    def _add_bag_unit_counts(self, gdf_buildings):
+        """Add bag_units and bag_dwellings, or leave both out when the units cannot be fetched.
+
+        A partial download would read as buildings without units, which apply_bag_dwellings drops.
+        """
+        try:
+            units = self._fetch_bag_units(gdf_buildings)
+        except (requests.RequestException, ValueError) as e:
+            logger.warning(f"BAG unit download failed, dwellings stay estimated: {e}")
+            return gdf_buildings
+        gdf = count_units_in_footprints(gdf_buildings, units)
+        logger.info(
+            "BAG units: %d in use, %d dwellings in %d of %d buildings",
+            len(units), int(gdf["bag_dwellings"].sum()), int((gdf["bag_dwellings"] > 0).sum()), len(gdf),
+        )
+        return gdf
+
+    def _fetch_bag_units(self, gdf_buildings):
+        """BAG units in use over every cell a building touches, as points in the buildings' CRS."""
+        import geopandas as gpd
+
+        bounds = gdf_buildings.to_crs("EPSG:28992").bounds // BAG_UNIT_CELL_M
+        cells = {
+            (x, y)
+            for x0, y0, x1, y1 in bounds.astype(int).itertuples(index=False)
+            for x in range(x0, x1 + 1)
+            for y in range(y0, y1 + 1)
+        }
+        logger.info(f"Fetching BAG units for {len(cells)} cells of {BAG_UNIT_CELL_M} m")
+        features = {}
+        for x, y in sorted(cells):
+            for feature in self._fetch_bag_unit_cell(x, y):
+                features[feature["properties"]["identificatie"]] = feature
+        units = gpd.GeoDataFrame.from_features(
+            list(features.values()), crs="EPSG:28992", columns=["status", "gebruiksdoel", "geometry"]
+        )
+        units = units[units["status"].isin(BAG_UNIT_STATUSES_IN_USE)]
+        return units.to_crs(gdf_buildings.crs)
+
+    def _fetch_bag_unit_cell(self, x: int, y: int) -> list:
+        """All BAG units in one cell from the PDOK WFS, cached as GeoJSON features."""
+        cache = self.cache_dir / "bag_units" / f"{x}_{y}.json"
+        if cache.exists():
+            return json.loads(cache.read_text())
+        size = BAG_UNIT_CELL_M
+        params = {
+            "service": "WFS", "version": "2.0.0", "request": "GetFeature",
+            "typeNames": "bag:verblijfsobject", "outputFormat": "application/json",
+            "srsName": "EPSG:28992", "count": BAG_WFS_PAGE,
+            "bbox": f"{x * size},{y * size},{(x + 1) * size},{(y + 1) * size},EPSG:28992",
+        }
+        features = []
+        while True:
+            response = self.session.get(BAG_WFS_URL, params={**params, "startIndex": len(features)}, timeout=120)
+            response.raise_for_status()
+            page = response.json()["features"]
+            features += [
+                {"type": "Feature", "geometry": f["geometry"],
+                 "properties": {k: f["properties"].get(k) for k in ("identificatie", "status", "gebruiksdoel")}}
+                for f in page
+            ]
+            if len(page) < BAG_WFS_PAGE:
+                break
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps(features))
+        return features
 
     def _log_stats(self, gdf_original, gdf_enriched):
         """Log enrichment statistics."""
