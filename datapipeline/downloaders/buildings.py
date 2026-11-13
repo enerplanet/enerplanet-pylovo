@@ -18,6 +18,35 @@ from ..building_constants import NO_ELECTRICITY_BUILDING_TYPES
 
 logger = logging.getLogger("datapipeline")
 
+HOUSE_TYPES = frozenset({
+    'house', 'detached', 'bungalow', 'cabin', 'hut', 'farm', 'farmhouse', 'static_caravan',
+    'semidetached_house', 'terrace', 'row_house',
+})
+APARTMENT_TYPES = frozenset({'apartments', 'residential', 'dormitory'})
+GROSS_FLOOR_AREA_PER_DWELLING_M2 = 90
+# Untyped buildings smaller than this are counted as one house; larger ones by area.
+MIN_MULTI_DWELLING_AREA_M2 = 400
+
+
+def estimate_dwellings(building_type: str, area: float, floors, eubucco_type: Optional[str] = None) -> int:
+    """Number of dwellings in one residential building, stored as households_per_building.
+
+    Houses count one dwelling. Apartment types and large untyped buildings count gross
+    floor area (footprint x floors) per GROSS_FLOOR_AREA_PER_DWELLING_M2. An untyped
+    building EUBUCCO classes as non-residential counts one. Missing floors count as one.
+    """
+    import pandas as pd
+
+    if building_type in HOUSE_TYPES:
+        return 1
+    gross_area = area * (floors if pd.notna(floors) else 1)
+    by_area = max(1, round(gross_area / GROSS_FLOOR_AREA_PER_DWELLING_M2))
+    if building_type in APARTMENT_TYPES:
+        return by_area
+    if eubucco_type == 'non-residential' or gross_area < MIN_MULTI_DWELLING_AREA_M2:
+        return 1
+    return by_area
+
 
 class BuildingDownloader(BaseDownloader):
     """Download building data from Geofabrik/OpenStreetMap."""
@@ -843,41 +872,18 @@ class BuildingDownloader(BaseDownloader):
                 match = re.search(r'"building:levels"=>"(\d+)"', other_tags)
                 if match:
                     return int(match.group(1))
-            return 1
+            return None
 
-        gdf['Floors'] = gdf['other_tags'].apply(extract_floors) if 'other_tags' in gdf.columns else 1
+        # Left empty without a building:levels tag so enrichment can fill it.
+        gdf['Floors'] = gdf['other_tags'].apply(extract_floors) if 'other_tags' in gdf.columns else None
 
-        # Estimate occupants
-        _res_low_density_types = {'house', 'detached', 'bungalow', 'cabin', 'hut', 'farm', 'farmhouse', 'static_caravan', 'yes'}
-        _res_semi_dense_types = {'semidetached_house'}
-        _res_apartment_types = {'apartments', 'residential', 'dormitory'}
-        _res_terrace_types = {'terrace', 'row_house'}
+        # Recounted after enrichment, once floors and the EUBUCCO type are known.
+        gdf['Occupants'] = [
+            estimate_dwellings(t, a, f) for t, a, f in zip(gdf['Building_T'], gdf['Area'], gdf['Floors'])
+        ]
 
-        def estimate_occupants(row):
-            area = row['Area']
-            b_type = row['Building_T']
-            floors = row['Floors']
-            if b_type in _res_low_density_types:
-                return max(1, int(area * floors / 50))
-            elif b_type in _res_semi_dense_types:
-                return max(2, int(area * floors / 40))
-            elif b_type in _res_apartment_types:
-                return max(4, int(area * floors / 35))
-            elif b_type in _res_terrace_types:
-                return max(2, int(area * floors / 45))
-            return 1
-
-        gdf['Occupants'] = gdf.apply(estimate_occupants, axis=1)
-
-        # Set free_walls
-        def calc_free_walls(b_type):
-            if b_type in _res_low_density_types:
-                return 4
-            elif b_type in (_res_semi_dense_types | _res_terrace_types | _res_apartment_types):
-                return 2
-            return 4
-
-        gdf['Free_walls'] = gdf['Building_T'].apply(calc_free_walls)
+        attached_types = {'semidetached_house', 'terrace', 'row_house'} | APARTMENT_TYPES
+        gdf['Free_walls'] = [2 if t in attached_types else 4 for t in gdf['Building_T']]
 
         # Add remaining columns
         gdf['Comment'] = None

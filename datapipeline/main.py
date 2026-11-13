@@ -69,6 +69,7 @@ from datapipeline.downloaders import (
     WaysDownloader,
     BoundaryDownloader,
 )
+from datapipeline.downloaders.buildings import estimate_dwellings
 from datapipeline.processors import (
     BuildingProcessor,
     TransformerProcessor,
@@ -143,6 +144,21 @@ class DataPipeline:
         if region_output_dir.exists():
             logger.info(f"Clearing output directory: {region_output_dir}")
             shutil.rmtree(region_output_dir)
+
+    @staticmethod
+    def _recount_dwellings(buildings_dir: Path) -> None:
+        """Recount dwellings in the enriched residential files, now that floors and the EUBUCCO type are final."""
+        import geopandas as gpd
+
+        for path in sorted(buildings_dir.glob("Res_*_enriched*.gpkg")):
+            gdf = gpd.read_file(path)
+            types = gdf["type_eubucco"] if "type_eubucco" in gdf.columns else [None] * len(gdf)
+            gdf["Occupants"] = [
+                estimate_dwellings(t, a, f, e)
+                for t, a, f, e in zip(gdf["Building_T"], gdf["Area"], gdf["Floors"], types)
+            ]
+            gdf.to_file(path, driver="GPKG")
+            logger.info("Recounted dwellings in %s: %d", path.name, int(gdf["Occupants"].sum()))
 
     def _clear_enrichment_cache(self):
         """Clear enrichment cache directories (3dbag, ep_online, cbs, eubucco) to free disk space.
@@ -550,6 +566,7 @@ class DataPipeline:
                 )
             except Exception as e:
                 logger.warning(f"Building enrichment failed: {e}")
+            self._recount_dwellings(outputs["buildings"])
 
         # Clear enrichment cache after successful processing to free disk space
         self._clear_enrichment_cache()
@@ -710,6 +727,7 @@ Examples:
                 buildings_dir,
                 ep_online_api_key=args.ep_online_key,
             )
+            pipeline._recount_dwellings(buildings_dir)
             pipeline._clear_enrichment_cache()
         elif args.only:
             if args.only == "transformers":

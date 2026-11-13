@@ -450,7 +450,11 @@ class DatabaseConstructor:
                             removed = cur.rowcount
                             if removed > 0:
                                 print(f"Dropped {removed} unusable geometries from {staging_full_name}")
-                        
+
+                        # The datapipeline leaves floors empty where neither OSM nor an enricher gave a count.
+                        if table_name == "res":
+                            cur.execute(f"UPDATE {staging_full_name} SET floors = 1 WHERE floors IS NULL;")
+
                         # 2. Publish: Insert from staging to production
                         print(f"Moving data from {staging_full_name} to {target_table}...")
                         cur.execute(f"""
