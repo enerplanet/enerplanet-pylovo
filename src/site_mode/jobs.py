@@ -71,12 +71,18 @@ def _connect():
 
 def _heartbeat(job_id: int, holder: dict, stop: threading.Event) -> None:
     """Record the generator's current stage every HEARTBEAT_SECONDS until stopped."""
-    with _connect() as conn, conn.cursor() as cur:
-        while not stop.wait(HEARTBEAT_SECONDS):
-            generator = holder.get("generator")
-            stage = generator.current_stage if generator is not None else "preparing"
-            cur.execute("UPDATE site_job SET heartbeat_at = NOW(), stage = %s WHERE job_id = %s",
-                        (stage[:100], job_id))
+    # Not `with conn`: psycopg2 2.9 opens a transaction there even under
+    # autocommit, which would hold the job row and block _finish forever.
+    conn = _connect()
+    try:
+        with conn.cursor() as cur:
+            while not stop.wait(HEARTBEAT_SECONDS):
+                generator = holder.get("generator")
+                stage = generator.current_stage if generator is not None else "preparing"
+                cur.execute("UPDATE site_job SET heartbeat_at = NOW(), stage = %s WHERE job_id = %s",
+                            (stage[:100], job_id))
+    finally:
+        conn.close()
 
 
 def _finish(cur, job_id: int, holder: dict, status: str, result: dict | None, error: str | None) -> None:
